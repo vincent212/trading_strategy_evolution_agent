@@ -1,33 +1,28 @@
 """
-The FunSearch evolutionary loop.
+Evolutionary search over trainable strategies.
 
-- ProgramDatabase holds several 'islands' (separate populations) to preserve
-  diversity. Each entry is a scored strategy.
-- Each step: pick an island, sample high-scoring parents, ask the LLM (Haiku by
-  default) for an improved child, compile it, evaluate it on the TRAIN period via
-  backtest.block_cv_score, and insert it back into that island.
-- Islands are periodically reset: the weakest half are wiped and reseeded from the
-  best survivors, which stops the search from stagnating.
+The program database is divided into islands (independent sub-populations). Each
+step samples two high-scoring parents from one island, asks the model for an
+improved child, evaluates the child by quarter cross-validation (fit on train
+quarters, score OOS on test quarters, median over 100 splits), and inserts it
+back into that island. Every `reset_every` steps the lower-scoring half of the
+islands are cleared and reseeded from the best strategy found so far.
 
-SECURITY NOTE: this compiles and runs LLM-generated Python via exec(). It is intended
-to run locally on your own machine on code you can inspect. The exec namespace is
-restricted to a small builtin set, but that is a speed bump, not a sandbox. Do not
-point this at an untrusted model or run it on shared infrastructure without a real
-sandbox (subprocess + seccomp / container).
+Candidate code is executed via exec() in a restricted namespace. This is a
+constraint on convenience, not a security boundary; run only inspected code.
 """
 from __future__ import annotations
 import re
-import math
 import random
 import numpy as np
 
 import prompt as prompt_mod
 import backtest as bt
+import params as P
 
-MODEL = "claude-haiku-4-5"          # the mutation operator; change in run.py if desired
+MODEL = "claude-haiku-4-5"
 _CODE_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
 
-# A deliberately small builtin surface for exec'd strategies.
 _SAFE_BUILTINS = {
     "abs": abs, "min": min, "max": max, "range": range, "len": len,
     "float": float, "int": int, "bool": bool, "round": round, "sum": sum,
@@ -42,52 +37,58 @@ def extract_code(text: str) -> str:
 
 
 def compile_strategy(code: str):
-    """exec a strategy code string and return the callable. Raises on failure."""
+    """exec a candidate; return (strategy_fn, param_space_dict). Raises on failure."""
     import pandas as pd
     g = {"__builtins__": _SAFE_BUILTINS, "pd": pd, "np": np}
-    exec(code, g)                                   # noqa: S102 (see SECURITY NOTE)
-    fn = g.get("strategy")
-    if not callable(fn):
+    exec(code, g)                                   # see module docstring
+    strat = g.get("strategy")
+    space_fn = g.get("param_space")
+    if not callable(strat):
         raise ValueError("no callable `strategy` defined")
-    return fn
+    space = space_fn() if callable(space_fn) else {}
+    if not isinstance(space, dict):
+        raise ValueError("param_space() must return a dict")
+    return strat, space
 
 
-# ---------------------------------------------------------------------------
+def alpha_tools_module():
+    import alpha_tools
+    return alpha_tools
+
 
 class Program:
-    __slots__ = ("code", "score", "diagnostics", "signal")
+    __slots__ = ("code", "score", "diagnostics", "space")
 
-    def __init__(self, code, score, diagnostics, signal):
+    def __init__(self, code, score, diagnostics, space):
         self.code = code
         self.score = score
         self.diagnostics = diagnostics
-        self.signal = signal            # cached in-sample signal, for the null bar
+        self.space = space
 
     def as_parent(self):
         return {"code": self.code, "score": self.score, "diagnostics": self.diagnostics}
 
 
 class ProgramDatabase:
-    def __init__(self, n_islands: int = 4, temperature: float = 0.7):
+    def __init__(self, n_islands=4, temperature=0.7, seed=0):
         self.islands: list[list[Program]] = [[] for _ in range(n_islands)]
         self.temperature = temperature
-        self.rng = random.Random(0)
+        self.rng = random.Random(seed)
 
-    def add(self, island: int, prog: Program):
+    def add(self, island, prog):
         self.islands[island].append(prog)
 
-    def best(self) -> Program | None:
-        allp = [p for isl in self.islands for p in isl]
+    def best(self):
+        allp = self.all_programs()
         return max(allp, key=lambda p: p.score) if allp else None
 
-    def all_programs(self) -> list[Program]:
+    def all_programs(self):
         return [p for isl in self.islands for p in isl]
 
-    def pick_island(self) -> int:
+    def pick_island(self):
         return self.rng.randrange(len(self.islands))
 
-    def sample_parents(self, island: int, k: int = 2) -> list[Program]:
-        """Softmax sampling by score within an island (best first in the return)."""
+    def sample_parents(self, island, k=2):
         pop = self.islands[island]
         if not pop:
             return []
@@ -96,69 +97,72 @@ class ProgramDatabase:
         w = w / w.sum()
         k = min(k, len(pop))
         idx = list(np.random.choice(len(pop), size=k, replace=False, p=w))
-        chosen = [pop[i] for i in idx]
-        return sorted(chosen, key=lambda p: p.score, reverse=True)
+        return sorted((pop[i] for i in idx), key=lambda p: p.score, reverse=True)
 
-    def reset_weak_islands(self, keep_fraction: float = 0.5):
-        """Wipe the weakest islands; reseed each from the best program overall."""
-        best_by_island = [(i, max((p.score for p in isl), default=-9.99))
-                          for i, isl in enumerate(self.islands)]
-        best_by_island.sort(key=lambda t: t[1])
+    def reset_weak_islands(self, keep_fraction=0.5):
+        best_score = [(i, max((p.score for p in isl), default=-9.99))
+                      for i, isl in enumerate(self.islands)]
+        best_score.sort(key=lambda t: t[1])
         n_reset = int(len(self.islands) * (1 - keep_fraction))
-        survivors = [p for isl in self.islands for p in isl]
+        survivors = self.all_programs()
         if not survivors:
             return
-        seed = max(survivors, key=lambda p: p.score)
-        for i, _ in best_by_island[:n_reset]:
-            self.islands[i] = [Program(seed.code, seed.score, seed.diagnostics, seed.signal)]
+        champ = max(survivors, key=lambda p: p.score)
+        for i, _ in best_score[:n_reset]:
+            self.islands[i] = [Program(champ.code, champ.score, champ.diagnostics, champ.space)]
 
-
-# ---------------------------------------------------------------------------
 
 class Evolver:
-    def __init__(self, data_train, close_train, client, model=MODEL,
-                 n_islands=4, k_parents=2, cv_kwargs=None, log=print):
-        self.data = data_train
-        self.close = close_train
+    def __init__(self, data, splits, client, model=MODEL, n_islands=4, k_parents=2,
+                 fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print):
+        self.data = data
+        self.splits = splits
         self.client = client
         self.model = model
         self.k_parents = k_parents
-        self.db = ProgramDatabase(n_islands=n_islands)
-        self.cv_kwargs = cv_kwargs or {}
+        self.fit_budget = fit_budget
+        self.cost = cost
+        self.jobs = jobs
+        self.seed = seed
+        self.tools = alpha_tools_module()
+        self.db = ProgramDatabase(n_islands=n_islands, seed=seed)
         self.log = log
         self.n_evaluated = 0
         self.n_rejected = 0
 
-    def evaluate(self, code: str) -> Program | None:
-        """Compile + score a candidate on the TRAIN period. None if invalid/weak."""
+    def evaluate(self, code):
+        """Compile, quick-check, then quarter-CCV score. None if invalid."""
+        import pandas as pd
         try:
-            fn = compile_strategy(code)
-            signal = fn(self.data, alpha_tools_module())
-            import pandas as pd
-            if not isinstance(signal, pd.Series):
+            strat, space = compile_strategy(code)
+            sig = strat(self.data, self.tools, P.midpoint(space))   # cheap validity check
+            if not isinstance(sig, pd.Series):
                 raise TypeError("strategy did not return a pandas Series")
-            diag = bt.block_cv_score(signal, self.close, **self.cv_kwargs)
-        except Exception as e:                      # any failure = rejected candidate
+            diag = bt.ccv_median_oos(strat, space, self.data, self.tools, self.splits,
+                                     self.fit_budget, self.cost, self.jobs, self.seed)
+        except Exception:
+            self.n_rejected += 1
+            return None
+        score = diag["median_oos"]
+        if not np.isfinite(score):
             self.n_rejected += 1
             return None
         self.n_evaluated += 1
-        if diag["reason"] != "ok":
-            return None
-        return Program(code, diag["score"], diag, signal)
+        return Program(code, float(score), diag, space)
 
-    def seed(self, seed_code: str):
+    def seed(self, seed_code):
         prog = self.evaluate(seed_code)
         if prog is None:
             raise RuntimeError("seed strategy failed to evaluate — check the contract")
         for i in range(len(self.db.islands)):
-            self.db.add(i, Program(prog.code, prog.score, prog.diagnostics, prog.signal))
-        self.log(f"seed score={prog.score:.3f}  {prog.diagnostics['block_sharpes']}")
+            self.db.add(i, Program(prog.code, prog.score, prog.diagnostics, prog.space))
+        self.log(f"seed median_oos={prog.score:.3f}")
 
-    def _mutate(self, parents: list[Program]) -> str:
+    def _mutate(self, parents):
         msg = self.client.messages.create(
             model=self.model,
-            max_tokens=1200,
-            temperature=1.0,                        # diversity across mutations (Haiku)
+            max_tokens=1500,
+            temperature=1.0,
             system=prompt_mod.SYSTEM,
             messages=[{"role": "user",
                        "content": prompt_mod.build_user_prompt([p.as_parent() for p in parents])}],
@@ -166,7 +170,7 @@ class Evolver:
         text = next((b.text for b in msg.content if b.type == "text"), "")
         return extract_code(text)
 
-    def step(self) -> Program | None:
+    def step(self):
         island = self.db.pick_island()
         parents = self.db.sample_parents(island, k=self.k_parents)
         if not parents:
@@ -177,11 +181,11 @@ class Evolver:
             self.log(f"  mutation API error: {e}")
             return None
         child = self.evaluate(code)
-        if child is not None and child.score > -9.0:
+        if child is not None:
             self.db.add(island, child)
         return child
 
-    def run(self, iterations: int, reset_every: int = 50, log_every: int = 10):
+    def run(self, iterations, reset_every=50, log_every=10):
         for it in range(1, iterations + 1):
             child = self.step()
             if it % reset_every == 0:
@@ -189,12 +193,7 @@ class Evolver:
             if it % log_every == 0:
                 best = self.db.best()
                 b = best.score if best else float("nan")
-                self.log(f"[{it:4d}] best={b:.3f}  eval={self.n_evaluated} "
+                self.log(f"[{it:4d}] best_median_oos={b:.3f}  eval={self.n_evaluated} "
                          f"rej={self.n_rejected}"
                          + (f"  child={child.score:.3f}" if child else "  child=REJECT"))
         return self.db.best()
-
-
-def alpha_tools_module():
-    import alpha_tools
-    return alpha_tools
