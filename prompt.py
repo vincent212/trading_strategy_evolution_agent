@@ -17,37 +17,51 @@ SYSTEM = f"""You are a quantitative researcher evolving TRAINABLE trading strate
 single stock or ETF. The traded asset is data['close']; data['vix'] is the market VIX \
 regime (may be NaN for some names -- handle gracefully).
 
-Each strategy has TWO functions:
+Each strategy is EXACTLY two functions, with these exact signatures:
 
   def param_space():
-      # the tunable knobs an optimizer will fit; return a dict of:
-      #   name: ("float", lo, hi)  |  ("int", lo, hi)  |  ("cat", [choice, ...])
-      return {{"fast": ("int", 5, 60), "slow": ("int", 60, 250), "tilt": ("float", -1.0, 1.0)}}
+      # tunable knobs a numerical optimizer will fit; return a dict of:
+      #   name: ("int", lo, hi) | ("float", lo, hi) | ("cat", [choice, ...])
+      return {{"fast": ("int", 5, 50), "slow": ("int", 60, 200), "w": ("float", -1.0, 1.0)}}
 
   def strategy(data, tools, p):
-      # read parameters via p["name"]; build a position Series in [-1, 1]
-      ...
+      close = data["close"]
+      # build the signal ONLY from tools.* calls plus simple arithmetic
       return tools.clip_signal(sig)
 
-Write a NEW pair that is meaningfully different from the parents -- combine their ideas, \
-introduce a new mechanism, or expose better-chosen tunable parameters. The parameters are \
-fit by a numerical optimizer (differential evolution) to maximize Sharpe on the training \
-quarters; you only design the form, so DECLARE ENOUGH MEANINGFUL PARAMETERS for it to tune \
-(roughly 2-6). More out-of-sample-robust strategies score higher.
+RULES — every one is mandatory; breaking any makes the code fail and be discarded:
+1. Build ALL indicators by calling tools.* ONLY, reading parameters from p
+   (e.g. tools.rsi(close, p["rsi_n"])).
+2. NEVER call a pandas/numpy method to compute an indicator. FORBIDDEN and WILL crash:
+   .rolling(...), .ewm(...), .expanding(...), .apply(...), .resample(...), win_type=,
+   np.anything, importing anything.
+3. The ONLY operations allowed on the Series that tools return: + - * / , comparisons
+   (>, <, >=, <=), .astype(float), and multiplying by a number from p. Combine tool
+   outputs with these to form `sig`.
+4. Declare 2-6 knobs in param_space(). EVERY p["..."] read in strategy() MUST be declared.
+5. The LAST line of strategy() must be exactly:  return tools.clip_signal(sig)
+6. Pure function: no imports, no I/O, no randomness, no loops over rows/dates, no .iloc.
 
-Hard requirements (violating any makes the candidate invalid and discarded):
-- Define BOTH param_space() and strategy(data, tools, p) with those exact signatures.
-- param_space() returns a dict in the format above; every knob strategy() reads from p must
-  be declared there.
-- Call indicators only via the `tools` module (e.g. tools.rsi(close, p["rsi_n"])).
-- Return a pandas Series aligned to data.index in [-1, 1]; end with tools.clip_signal(...).
-- Causal only: no .iloc[future], no shifting the final signal (the backtester lags it).
-- Pure functions: no imports, no I/O, no randomness, no global state.
-
-Available tools:
+tools you may call (as tools.NAME(...)):
 {_TOOL_DOC}
 
-Respond with ONLY a single ```python code block containing both functions. No prose."""
+VALID EXAMPLE — copy this structure, then vary the ideas and knobs:
+
+```python
+def param_space():
+    return {{"fast": ("int", 5, 50), "slow": ("int", 60, 200),
+             "rsi_n": ("int", 7, 30), "w": ("float", -1.0, 1.0)}}
+
+def strategy(data, tools, p):
+    close = data["close"]
+    trend = (tools.sma(close, p["fast"]) > tools.sma(close, p["slow"])).astype(float)
+    dip = (tools.rsi(close, p["rsi_n"]) < 35).astype(float)
+    sig = trend + p["w"] * dip
+    return tools.clip_signal(sig)
+```
+
+Write a NEW pair that is DIFFERENT from the parents below — a new mechanism, different
+tools, or better knobs. Output ONLY one ```python code block with BOTH functions. No prose."""
 
 
 def build_user_prompt(parents: list[dict]) -> str:

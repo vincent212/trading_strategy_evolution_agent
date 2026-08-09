@@ -123,7 +123,7 @@ class Evolver:
         self.fit_budget = fit_budget
         self.cost = cost
         self.jobs = jobs
-        self.seed = seed
+        self.seed_val = seed
         self.tools = alpha_tools_module()
         self.db = ProgramDatabase(n_islands=n_islands, seed=seed)
         self.log = log
@@ -139,7 +139,7 @@ class Evolver:
             if not isinstance(sig, pd.Series):
                 raise TypeError("strategy did not return a pandas Series")
             diag = bt.ccv_median_oos(strat, space, self.data, self.tools, self.splits,
-                                     self.fit_budget, self.cost, self.jobs, self.seed)
+                                     self.fit_budget, self.cost, self.jobs, self.seed_val)
         except Exception:
             self.n_rejected += 1
             return None
@@ -159,15 +159,11 @@ class Evolver:
         self.log(f"seed median_oos={prog.score:.3f}")
 
     def _mutate(self, parents):
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=1500,
-            temperature=1.0,
-            system=prompt_mod.SYSTEM,
-            messages=[{"role": "user",
-                       "content": prompt_mod.build_user_prompt([p.as_parent() for p in parents])}],
-        )
-        text = next((b.text for b in msg.content if b.type == "text"), "")
+        user = prompt_mod.build_user_prompt([p.as_parent() for p in parents])
+        # The client (Anthropic or OpenAI-compatible) handles provider specifics,
+        # including dropping temperature on models that reject it.
+        text = self.client.mutate(prompt_mod.SYSTEM, user, model=self.model,
+                                  max_tokens=1500, temperature=1.0)
         return extract_code(text)
 
     def step(self):
