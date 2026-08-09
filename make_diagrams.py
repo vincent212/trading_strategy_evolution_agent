@@ -74,7 +74,7 @@ def save(fig, name):
 # ---------------------------------------------------------------------------
 def fig_loop():
     fig, ax = new_ax(10, 8.5)
-    ax.text(0.5, 0.96, "How the strategies evolve", ha="center",
+    ax.text(0.5, 0.96, "Search loop", ha="center",
             fontsize=21, fontweight="bold", color=INK)
 
     bx, bw = 0.12, 0.56
@@ -83,8 +83,8 @@ def fig_loop():
         "hundreds of little trading programs", fc=BLUEBG, ec=BLUE, tc=BLUE)
     box(ax, bx, 0.545, bw, 0.15, "LANGUAGE  MODEL",
         "writes a new strategy · sees CODE, never prices", fc=WHITE, ec=INK)
-    box(ax, bx, 0.315, bw, 0.14, "BACKTEST  +  SCORE",
-        "does it actually hold up?", fc=GRAYBG, ec=GRAYED)
+    box(ax, bx, 0.315, bw, 0.14, "FIT  +  CROSS-VALIDATE",
+        "median out-of-sample Sharpe", fc=GRAYBG, ec=GRAYED)
 
     arrow(ax, cx, 0.775, cx, 0.695)
     label(ax, 0.71, 0.735, "pick 2 of the\nbest 'parents'")
@@ -109,43 +109,11 @@ def fig_loop():
 
 
 # ---------------------------------------------------------------------------
-def fig_data():
-    fig, ax = new_ax(10, 8.5)
-    ax.text(0.5, 0.96, "Where the data comes from", ha="center",
-            fontsize=21, fontweight="bold", color=INK)
-
-    cx = 0.5
-    box(ax, 0.31, 0.84, 0.38, 0.085, "Yahoo Finance", fc=INK, ec=INK, tc=WHITE,
-        title_fs=16)
-    arrow(ax, cx, 0.84, cx, 0.755)
-    label(ax, 0.53, 0.798, "free  'yfinance'  library")
-
-    box(ax, 0.13, 0.615, 0.74, 0.14, "Pick ANY ticker",
-        "SPY   ·   AAPL   ·   TSLA   ·   QQQ   ·   NVDA   ·   …",
-        fc=BLUEBG, ec=BLUE, tc=BLUE)
-    arrow(ax, cx, 0.615, cx, 0.545)
-
-    box(ax, 0.10, 0.39, 0.37, 0.145, "Daily adjusted prices",
-        "the stock you trade", fc=GREENBG, ec=GREEN, tc=GREEN, title_fs=14)
-    box(ax, 0.53, 0.39, 0.37, 0.145, "The VIX",
-        "market 'fear gauge'", fc=AMBERBG, ec=AMBER, tc=AMBER, title_fs=14)
-    arrow(ax, 0.285, 0.39, 0.45, 0.315, MUTE)
-    arrow(ax, 0.715, 0.39, 0.55, 0.315, MUTE)
-
-    box(ax, 0.22, 0.19, 0.56, 0.10, "Cached on disk",
-        "downloaded once, reused every run", fc=WHITE, ec=INK, title_fs=14)
-    arrow(ax, cx, 0.19, cx, 0.125)
-    ax.text(0.5, 0.075, "handed to every strategy as  close  and  vix",
-            ha="center", fontsize=13.5, color=INK, fontweight="bold")
-    save(fig, "02_data.png")
-
-
-# ---------------------------------------------------------------------------
 def fig_islands():
     fig, ax = new_ax(10, 7.5)
-    ax.text(0.5, 0.95, "Four 'islands' keep the search diverse", ha="center",
+    ax.text(0.5, 0.95, "Islands", ha="center",
             fontsize=21, fontweight="bold", color=INK)
-    ax.text(0.5, 0.875, "Each population evolves on its own — no cross-breeding",
+    ax.text(0.5, 0.875, "Independent sub-populations; no members are exchanged",
             ha="center", fontsize=13, color=MUTE)
 
     islands = [("Island 1", GREEN, GREENBG, "kept"),
@@ -179,62 +147,45 @@ def numbered(ax, x, y, n, color):
 
 
 def fig_gauntlet():
-    fig, ax = new_ax(11.5, 6.8)
-    ax.text(0.5, 0.95, "Before I believe a strategy, it must survive all three",
-            ha="center", fontsize=19, fontweight="bold", color=INK)
+    fig, ax = new_ax(13, 6.6)
+    ax.text(0.5, 0.95, "Evaluation: fit, cross-validate, gate, hold out",
+            ha="center", fontsize=18.5, fontweight="bold", color=INK)
 
-    w, gap = 0.275, 0.045
-    x0 = (1 - (3 * w + 2 * gap)) / 2
-    y, h = 0.30, 0.46
+    w, gap = 0.19, 0.028
+    x0 = (1 - (4 * w + 3 * gap)) / 2
+    y, h = 0.32, 0.44
     cards = [
-        (BLUE, BLUEBG, "Consistency", "Did it work in MOST\nperiods — not one\nlucky stretch?"),
-        (GREEN, GREENBG, "Unseen data", "Tested once on recent\nyears the search\nnever got to see."),
-        (AMBER, AMBERBG, "The null-max bar", "Beat what a strategy\ncould fake on pure\nrandom noise."),
+        (BLUE, BLUEBG, "Fit",
+         "Tune the parameters\non 75% of the\nquarters (max Sharpe)."),
+        (GREEN, GREENBG, "Cross-validate",
+         "Score on the other\n25%. Repeat 100x.\nTake the MEDIAN\nout-of-sample Sharpe."),
+        (AMBER, AMBERBG, "Null-max bar",
+         "Refit on sign-flipped\nnoise; the real median\nmust beat what noise\ncan fake."),
+        (INK, GRAYBG, "2026 held out",
+         "Scored once on this\nyear — never seen by\nthe search or the bar."),
     ]
     for i, (ec, fc, title, body) in enumerate(cards):
         x = x0 + i * (w + gap)
         box(ax, x, y, w, h, "", fc=fc, ec=ec, lw=1.8)
-        numbered(ax, x + w / 2, y + h - 0.055, i + 1, ec)
-        ax.text(x + w / 2, y + h - 0.135, title, ha="center", fontsize=15.5,
+        numbered(ax, x + w / 2, y + h - 0.05, i + 1, ec)
+        ax.text(x + w / 2, y + h - 0.125, title, ha="center", fontsize=14.5,
                 color=ec, fontweight="bold")
-        ax.text(x + w / 2, y + h * 0.42, body, ha="center", va="center",
-                fontsize=12, color=INK, linespacing=1.4)
+        ax.text(x + w / 2, y + h * 0.40, body, ha="center", va="center",
+                fontsize=11, color=INK, linespacing=1.4)
+        if i < 3:
+            arrow(ax, x + w + 0.002, y + h / 2, x + w + gap - 0.002, y + h / 2, MUTE, lw=1.8)
 
-    # glyphs near each card bottom
-    # 1: five checked blocks
-    bx = x0 + 0.045
-    for k in range(5):
-        ax.add_patch(FancyBboxPatch((bx + k * 0.038, y + 0.05), 0.03, 0.05,
-                     boxstyle="round,pad=0.002", fc=WHITE, ec=BLUE, lw=1.2))
-        ax.text(bx + k * 0.038 + 0.015, y + 0.075, "✓", ha="center", va="center",
-                color=BLUE, fontsize=10)
-    # 2: train | wall | test
-    x = x0 + (w + gap)
-    ax.add_patch(FancyBboxPatch((x + 0.03, y + 0.05), 0.12, 0.05,
-                 boxstyle="round,pad=0.002", fc=WHITE, ec=GREEN, lw=1.2))
-    ax.text(x + 0.09, y + 0.075, "train", ha="center", va="center", color=GREEN, fontsize=10)
-    ax.plot([x + 0.157, x + 0.157], [y + 0.045, y + 0.105], color=INK, lw=2.6)
-    ax.add_patch(FancyBboxPatch((x + 0.165, y + 0.05), 0.07, 0.05,
-                 boxstyle="round,pad=0.002", fc=GREENBG, ec=GREEN, lw=1.2))
-    ax.text(x + 0.20, y + 0.075, "test", ha="center", va="center", color=GREEN, fontsize=10)
-    # 3: noise squiggle
-    x = x0 + 2 * (w + gap)
-    xs = np.linspace(x + 0.04, x + 0.15, 40)
-    ax.plot(xs, y + 0.075 + 0.018 * np.sin(np.linspace(0, 9, 40)), color=AMBER, lw=1.8)
-    ax.text(x + 0.205, y + 0.075, "must\nbeat this", ha="center", va="center",
-            fontsize=9.5, color=AMBER, linespacing=1.2)
-
-    arrow(ax, 0.055, y + h / 2, x0 - 0.008, y + h / 2, MUTE)
-    ax.text(0.05, y + h / 2 + 0.07, "a\nstrategy", ha="center", va="center",
-            fontsize=11, color=MUTE, linespacing=1.2)
-    arrow(ax, x0 + 3 * w + 2 * gap + 0.008, y + h / 2, 0.965, y + h / 2, GREEN)
-    ax.text(0.955, y + h / 2 + 0.06, "KEEP", ha="center", fontsize=13.5,
+    arrow(ax, 0.045, y + h / 2, x0 - 0.006, y + h / 2, MUTE)
+    ax.text(0.032, y + h / 2 + 0.075, "a\nstrategy", ha="center", va="center",
+            fontsize=10.5, color=MUTE, linespacing=1.2)
+    arrow(ax, x0 + 4 * w + 3 * gap + 0.006, y + h / 2, 0.965, y + h / 2, GREEN)
+    ax.text(0.955, y + h / 2 + 0.065, "KEEP", ha="center", fontsize=13,
             color=GREEN, fontweight="bold")
-    ax.text(0.5, 0.135, "Fail any one, and it's thrown out — no matter how good the backtest looked.",
-            ha="center", fontsize=12.5, color=MUTE)
+    ax.text(0.5, 0.15, "Steps 1–2 are the fitness the search maximizes; step 3 is the pass/fail gate; step 4 is the final untouched number.",
+            ha="center", fontsize=12, color=MUTE)
     save(fig, "04_gauntlet.png")
 
 
 if __name__ == "__main__":
-    fig_loop(); fig_data(); fig_islands(); fig_gauntlet()
+    fig_loop(); fig_islands(); fig_gauntlet()
     print("\nAll diagrams written to", OUT)

@@ -1,33 +1,55 @@
 """
-The evolvable unit. This is the ONLY code the LLM rewrites — everything else
-(data, tools, backtest, gate) is fixed. The loop seeds its first island with
-this trivial trend-follower, then mutates from here.
+The evolvable unit — now a TRAINABLE strategy. Every candidate the LLM emits
+declares two things:
 
-Contract for every strategy the loop accepts:
-  - signature: def strategy(data, tools) -> pd.Series
-  - `data`  : DataFrame with columns 'close' and 'vix', indexed by date
-  - `tools` : the alpha_tools module (call tools.rsi(...), tools.sma(...), etc.)
-  - returns : a pd.Series aligned to data.index, values in [-1, 1]
-              (+1 = full long, -1 = full short, 0 = flat)
-  - MUST be causal: use only the provided tools and pandas; never index into the
-    future. The backtester adds a 1-bar execution lag on top, so do not shift the
-    final signal yourself.
+  param_space() -> dict of tunable knobs and their ranges
+  strategy(data, tools, p) -> a position Series in [-1, 1], using p's values
+
+The harness fits `p` on the train quarters (SciPy differential evolution,
+maximizing Sharpe) and evaluates the fitted strategy on the held-out test
+quarters. The LLM never runs the fit; it only designs the parametric form.
+
+Contract for every accepted candidate:
+  - param_space() returns {name: ("float"|"int", lo, hi) | ("cat", [choices])}
+  - strategy(data, tools, p): data has columns 'close' and 'vix' (vix may be NaN);
+    read parameters via p["name"]; return a pd.Series aligned to data.index in
+    [-1, 1]; end with tools.clip_signal(...).
+  - Causal only (tools look backward; never index the future; the backtester adds
+    the 1-bar execution lag). Pure function: no imports, no I/O, no randomness.
 """
 
 
-def strategy(data, tools):
+def param_space():
+    return {
+        "fast":  ("int", 5, 60),
+        "slow":  ("int", 60, 250),
+        "rsi_n": ("int", 5, 30),
+        "tilt":  ("float", -1.0, 1.0),
+    }
+
+
+def strategy(data, tools, p):
     close = data["close"]
-    fast = tools.sma(close, 50)
-    slow = tools.sma(close, 200)
-    signal = (fast > slow).astype(float)      # long in an uptrend, flat otherwise
+    trend = (tools.sma(close, p["fast"]) > tools.sma(close, p["slow"])).astype(float)
+    dip = (tools.rsi(close, p["rsi_n"]) < 30).astype(float)
+    signal = trend + p["tilt"] * dip
     return tools.clip_signal(signal)
 
 
 SEED_CODE = '''\
-def strategy(data, tools):
+def param_space():
+    return {
+        "fast":  ("int", 5, 60),
+        "slow":  ("int", 60, 250),
+        "rsi_n": ("int", 5, 30),
+        "tilt":  ("float", -1.0, 1.0),
+    }
+
+
+def strategy(data, tools, p):
     close = data["close"]
-    fast = tools.sma(close, 50)
-    slow = tools.sma(close, 200)
-    signal = (fast > slow).astype(float)
+    trend = (tools.sma(close, p["fast"]) > tools.sma(close, p["slow"])).astype(float)
+    dip = (tools.rsi(close, p["rsi_n"]) < 30).astype(float)
+    signal = trend + p["tilt"] * dip
     return tools.clip_signal(signal)
 '''
