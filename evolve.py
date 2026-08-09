@@ -123,7 +123,7 @@ class Evolver:
         self.fit_budget = fit_budget
         self.cost = cost
         self.jobs = jobs
-        self.seed = seed
+        self.seed_val = seed
         self.tools = alpha_tools_module()
         self.db = ProgramDatabase(n_islands=n_islands, seed=seed)
         self.log = log
@@ -139,7 +139,7 @@ class Evolver:
             if not isinstance(sig, pd.Series):
                 raise TypeError("strategy did not return a pandas Series")
             diag = bt.ccv_median_oos(strat, space, self.data, self.tools, self.splits,
-                                     self.fit_budget, self.cost, self.jobs, self.seed)
+                                     self.fit_budget, self.cost, self.jobs, self.seed_val)
         except Exception:
             self.n_rejected += 1
             return None
@@ -159,14 +159,18 @@ class Evolver:
         self.log(f"seed median_oos={prog.score:.3f}")
 
     def _mutate(self, parents):
-        msg = self.client.messages.create(
+        kwargs = dict(
             model=self.model,
             max_tokens=1500,
-            temperature=1.0,
             system=prompt_mod.SYSTEM,
             messages=[{"role": "user",
                        "content": prompt_mod.build_user_prompt([p.as_parent() for p in parents])}],
         )
+        # `temperature` is removed on Opus 4.7/4.8 (400); keep it for models that accept
+        # it (Haiku 4.5, Sonnet 4.6) to diversify mutations.
+        if not self.model.startswith(("claude-opus-4-7", "claude-opus-4-8")):
+            kwargs["temperature"] = 1.0
+        msg = self.client.messages.create(**kwargs)
         text = next((b.text for b in msg.content if b.type == "text"), "")
         return extract_code(text)
 
