@@ -32,6 +32,10 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     hold = full[full.index.year >= holdout_year].copy()
     if len(pool) < 300:
         raise RuntimeError(f"insufficient pre-{holdout_year} data for {ticker}: {len(pool)} rows")
+    # Hard guarantee: the holdout year must never reach the evolution/fit/CV/gate.
+    # Only `pool` is passed to those; `full` is used solely for the final measurement.
+    assert int((pool.index.year >= holdout_year).sum()) == 0, \
+        "holdout year leaked into the training pool"
     log(f"{ticker}: pool {pool.index[0].date()}..{pool.index[-1].date()} ({len(pool)} rows) | "
         f"holdout {holdout_year}: {len(hold)} rows")
 
