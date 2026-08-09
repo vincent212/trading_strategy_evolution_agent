@@ -159,19 +159,11 @@ class Evolver:
         self.log(f"seed median_oos={prog.score:.3f}")
 
     def _mutate(self, parents):
-        kwargs = dict(
-            model=self.model,
-            max_tokens=1500,
-            system=prompt_mod.SYSTEM,
-            messages=[{"role": "user",
-                       "content": prompt_mod.build_user_prompt([p.as_parent() for p in parents])}],
-        )
-        # `temperature` is removed on Opus 4.7/4.8 (400); keep it for models that accept
-        # it (Haiku 4.5, Sonnet 4.6) to diversify mutations.
-        if not self.model.startswith(("claude-opus-4-7", "claude-opus-4-8")):
-            kwargs["temperature"] = 1.0
-        msg = self.client.messages.create(**kwargs)
-        text = next((b.text for b in msg.content if b.type == "text"), "")
+        user = prompt_mod.build_user_prompt([p.as_parent() for p in parents])
+        # The client (Anthropic or OpenAI-compatible) handles provider specifics,
+        # including dropping temperature on models that reject it.
+        text = self.client.mutate(prompt_mod.SYSTEM, user, model=self.model,
+                                  max_tokens=1500, temperature=1.0)
         return extract_code(text)
 
     def step(self):

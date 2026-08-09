@@ -24,8 +24,9 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                headroom=1.5, holdout_year=2026, reset_every=50, jobs=1, seed=0,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
-    from anthropic import Anthropic
-    client = Anthropic()                        # reads ANTHROPIC_API_KEY
+    import llm
+    client = llm.make_client(model)             # Anthropic, or OpenAI-compatible via LLM_BASE_URL
+    log(f"llm backend: {client.backend}")
 
     full = data_mod.get_data(ticker=ticker, start=start, end=end, refresh=refresh_data)
     pool = full[full.index.year < holdout_year].copy()
@@ -71,8 +72,9 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "config": dict(ticker=ticker, start=start, iterations=iterations, model=model,
-                       n_islands=n_islands, n_splits=n_splits, fit_budget=fit_budget,
-                       cost=cost, headroom=headroom, holdout_year=holdout_year),
+                       backend=client.backend, n_islands=n_islands, n_splits=n_splits,
+                       fit_budget=fit_budget, cost=cost, headroom=headroom,
+                       holdout_year=holdout_year),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        population=len(ev.db.all_programs())),
         "champion": {
