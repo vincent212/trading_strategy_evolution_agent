@@ -2,7 +2,7 @@
 
 ### An LLM breeds trading strategies. A deliberately paranoid engine decides whether they're real.
 
-*Point it at any ticker on Yahoo Finance — Apple, Tesla, an index fund — and it evolves a trading strategy for it. The hard part was never finding a strategy that looks good. It's refusing to believe a bad one. This repo is mostly about the refusing.*
+*Given any ticker on Yahoo Finance — Apple, Tesla, an index fund — it evolves a trading strategy for that name. The hard part was never finding a strategy that looks good. It's refusing to believe a bad one. This repo is mostly about the refusing.*
 
 There's a seductive idea floating around: point a large language model at market data, ask it for a winning trading strategy, and get rich. It doesn't work, and the reason it doesn't work is the same reason most quant research fails — not because the models are dumb, but because **searching hard for a great-looking result is a machine for manufacturing lies.**
 
@@ -40,7 +40,7 @@ def strategy(data, tools):
     return signal
 ```
 
-The language model can only build strategies out of a fixed toolbox of **safe, legitimate indicators** — moving averages, momentum, RSI, volatility measures, breakout levels, VIX regimes. It can't import anything weird, and — critically — it **can't peek at the future.** Every tool only looks backward. This keeps the search honest and inside the space of things a real trader could actually do.
+The language model can only build strategies out of a fixed toolbox of **safe, legitimate indicators** — moving averages, momentum, RSI, volatility measures, breakout levels, VIX regimes. It can't import anything weird, and — critically — it **can't peek at the future.** Every tool only looks backward. This keeps the search grounded and inside the space of things a real trader could actually do.
 
 ## Why four "islands"?
 
@@ -62,15 +62,15 @@ This is the half that matters, and the half almost everyone skips. Anyone can pr
 
 **Test 2 — Unseen data.** The most recent chunk of history is walled off. The search never touches it. The winner is tested on it exactly once, at the very end. If it looked brilliant on the old data and falls apart on the new data, that gap *is* the overfitting, and there's no hiding it.
 
-**Test 3 — The null-max bar.** This is the subtle killer, and my favorite part. Even a strategy that passes the first two tests might just be the luckiest of the thousands I tried. So I ask: *how good could a strategy look on pure noise?* I take the real prices and **scramble them into randomness** — flip each day's move like a coin — then measure the best result my search can squeeze out of that nonsense. That's the "null-max bar." If my real winner can't clearly beat the score achievable on random noise, it gets rejected. Full stop.
+**Test 3 — The null-max bar.** This is the subtle killer. Even a strategy that passes the first two tests might just be the luckiest of the thousands I tried. So I ask: *how good could a strategy look on pure noise?* I take the real prices and **scramble them into randomness** — flip each day's move like a coin — then measure the best result my search can squeeze out of that nonsense. That's the "null-max bar." If my real winner can't clearly beat the score achievable on random noise, it gets rejected. Full stop.
 
 The clever bit: this measures how *creative and flexible* my search is (a more powerful search can fit more nonsense, so it has to clear a higher bar), rather than the usual method of just counting how many strategies I tried — which perversely rewards you for looking at *fewer* ideas. Here, there's no reward for cutting corners.
 
 You need all three. None replaces another. Consistency without the unseen-data wall and the noise bar just ships a well-dressed mistake.
 
-## Running it — including on your favorite stock
+## Running it on any ticker
 
-Because it works on any ticker, using it is a one-liner. Point it at an index:
+Because it works on any ticker, using it is a one-liner. For an index:
 
 ```
 run the search on SPY
@@ -84,17 +84,17 @@ run the search on AAPL
 
 Under the hood it's the same loop: pull the data, breed strategies for a few hundred rounds, run the winner through the three-part gauntlet, and report back in plain language — *here's the best strategy, here's how it did on data it had never seen, here's the noise bar, and here's the verdict: keep it, or throw it out.* It's built to be blunt. A great-looking backtest that fails the gauntlet is not a discovery, and the system says so to your face.
 
-**One honest note about individual stocks.** A single company is riskier ground than a broad index. It has less history (a company that IPO'd in 2020 gives the search far less to learn from), and it lurches on earnings and news in ways the S&P 500 smooths out. So on a single name, those last two tests — unseen data and the noise bar — matter *more*, not less. The engine runs happily on one stock; it just gets more skeptical, as it should.
+**Individual stocks are harder ground than an index.** A single company has less history (one that IPO'd in 2020 gives the search far less to learn from), and it lurches on earnings and news in ways the S&P 500 smooths out. So on a single name, those last two tests — unseen data and the noise bar — matter *more*, not less. The engine runs on one stock the same way; it just becomes more skeptical.
 
-## The honest bottom line
+## The bottom line
 
-This does not print money. What it does is automate the *search* for trading ideas while making it structurally hard to lie to yourself about them — which is the real bottleneck in this work, not coming up with ideas. A "pass" here means *worth watching forward on paper*, not *bet the house*. There's no trading-cost realism beyond a simple fee, no borrowing costs — add those before you trust any number.
+This does not print money. What it does is automate the *search* for trading ideas while making it structurally hard to fool yourself about them — the real bottleneck in this work, not coming up with ideas. A "pass" here means *worth watching forward on paper*, not *bet the house*. There's no trading-cost realism beyond a simple fee, and no borrowing costs.
 
-But that's the whole philosophy. The language model is a brilliant, tireless intern who proposes ten thousand strategies and never gets bored or attached to any of them. The engine's job — my job — is to be the grizzled advisor who refuses to be impressed by a pretty chart.
+But that's the whole philosophy. The language model is a brilliant, tireless intern that proposes ten thousand strategies and never gets bored or attached to any of them. The engine's job is to be the grizzled advisor that refuses to be impressed by a pretty chart.
 
 ---
 
-## Try it yourself
+## Usage
 
 ```bash
 pip install -r requirements.txt
@@ -102,19 +102,17 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 python run.py --ticker SPY  --iterations 300      # an index ETF
 python run.py --ticker AAPL --iterations 300      # a single company
-python run.py --ticker QQQ  --start 2010-01-01    # pick your window
+python run.py --ticker QQQ  --start 2010-01-01    # a chosen window
 ```
 
 `--ticker` takes any Yahoo Finance symbol. A ~300-round run makes ~300 cheap Haiku calls
-(a few dollars). It prints a report and saves the full result to `runs/run_<TICKER>_*.json`.
+(a few dollars), prints a report, and saves the full result to `runs/run_<TICKER>_*.json`.
 
-Prefer to drive it from Claude? The whole search is wrapped as a **Claude Code subagent**
-in `.claude/agents/funsearch-alpha.md`. The inner mutation loop stays as thousands of
-direct API calls (you'd never want a heavyweight agent per mutation); the subagent is the
-outer supervisor that launches the run, reads the result, and reports the verdict. Run
-`claude` from this folder (or copy the file to `~/.claude/agents/`) and say:
-
-> Use the funsearch-alpha subagent to run a 500-round search on TSLA.
+The whole search is also wrapped as a **Claude Code subagent** in
+`.claude/agents/funsearch-alpha.md`. The inner mutation loop stays as thousands of direct
+API calls (a heavyweight agent per mutation would be wasteful); the subagent is the outer
+supervisor that launches the run, reads the result, and reports the verdict. Invoked from
+this folder, a request such as *"run a 500-round search on TSLA"* starts it.
 
 ## What's in the repo
 
@@ -130,14 +128,13 @@ outer supervisor that launches the run, reads the result, and reports the verdic
 | `make_diagrams.py` | regenerates the diagrams in `assets/` |
 | `.claude/agents/funsearch-alpha.md` | the Claude Code subagent wrapper |
 
-## Honest limitations (read before trusting any number)
+## Limitations
 
 - **This is not investment advice and it does not print money.** A "pass" means *worth
   paper-trading forward*, not *deploy capital*.
-- **Costs are a flat per-trade fee** — no slippage, borrow, or financing model. Add realism
-  before believing a Sharpe.
-- **It runs LLM-written code with `exec()`** on your machine. The builtin surface is
-  restricted, but it is a speed bump, not a sandbox — run only code you can inspect.
+- **Costs are a flat per-trade fee** — no slippage, borrow, or financing model is included.
+- **It runs LLM-written code with `exec()`** locally. The builtin surface is restricted,
+  but it is a speed bump, not a sandbox.
 - **Single names are noisier than indices** — less history, earnings gaps. The skeptical
   tests matter more there, not less.
 
