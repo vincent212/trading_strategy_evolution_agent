@@ -1,0 +1,15 @@
+# data cache and run outputs
+.cache/
+runs/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
