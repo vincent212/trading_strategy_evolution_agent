@@ -52,6 +52,8 @@ class _OpenAICompatClient:
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user}],
         )
+        if not r.choices:                       # empty/error response -> clean reject
+            return ""
         return r.choices[0].message.content or ""
 
 
@@ -60,6 +62,11 @@ def make_client(default_model: str):
     OpenAI-compatible when LLM_BASE_URL is set, otherwise Anthropic."""
     base = os.environ.get("LLM_BASE_URL")
     if base:
-        model = os.environ.get("LLM_MODEL") or "qwen2.5-coder:7b"
+        model = os.environ.get("LLM_MODEL")
+        if not model:
+            raise RuntimeError(
+                "LLM_BASE_URL is set but LLM_MODEL is not. Set LLM_MODEL to a model the "
+                "endpoint serves, e.g. 'qwen2.5-coder:7b' (Ollama) or "
+                "'llama-3.3-70b-versatile' (Groq).")
         return _OpenAICompatClient(base, os.environ.get("LLM_API_KEY"), model)
     return _AnthropicClient()

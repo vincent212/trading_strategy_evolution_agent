@@ -71,10 +71,10 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
 
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "config": dict(ticker=ticker, start=start, iterations=iterations, model=model,
-                       backend=client.backend, n_islands=n_islands, n_splits=n_splits,
-                       fit_budget=fit_budget, cost=cost, headroom=headroom,
-                       holdout_year=holdout_year),
+        "config": dict(ticker=ticker, start=start, iterations=iterations,
+                       model=getattr(client, "model", model), backend=client.backend,
+                       n_islands=n_islands, n_splits=n_splits, fit_budget=fit_budget,
+                       cost=cost, headroom=headroom, holdout_year=holdout_year),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        population=len(ev.db.all_programs())),
         "champion": {
