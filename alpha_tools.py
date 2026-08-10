@@ -95,21 +95,31 @@ def breakout(x: pd.Series, n: int) -> pd.Series:
 
 # ---- regime -----------------------------------------------------------------
 
-def vix_regime(vix: pd.Series, low: float = 15.0, high: float = 25.0) -> pd.Series:
+def vol_regime(x: pd.Series, n: int = 20, low: float = -0.5, high: float = 0.5,
+               lookback: int = 126) -> pd.Series:
     """
-    Coarse volatility regime from the VIX level:
-      +1 = calm  (vix < low), 0 = normal, -1 = stressed (vix > high).
+    Realized-volatility regime by rolling Z-SCORE of the asset's own vol — scale-free (the
+    z-score normalizes each ticker's vol) and fast:
+      +1 = low vol   (vol z-score < low),
+      -1 = high vol  (vol z-score > high),
+       0 = in between.
+    z = (realized_vol - rolling_mean) / rolling_std over `lookback` bars. `low`/`high` are
+    z-score cutoffs (e.g. -0.5 / +0.5) — the SAME on any ticker, so no per-ticker tuning.
     """
-    reg = pd.Series(0.0, index=vix.index)
-    reg[vix < low] = 1.0
-    reg[vix > high] = -1.0
+    rv = realized_vol(x, n=n)
+    m = rv.rolling(int(lookback), min_periods=int(n)).mean()
+    s = rv.rolling(int(lookback), min_periods=int(n)).std().replace(0.0, np.nan)
+    z = (rv - m) / s
+    reg = pd.Series(0.0, index=x.index)
+    reg[z < low] = 1.0
+    reg[z > high] = -1.0
     return reg
 
 
 def pctile_rank(x: pd.Series, n: int) -> pd.Series:
-    """Rolling percentile rank of x in [0, 1] over an n-bar window."""
+    """Rolling percentile rank of the current bar within its n-bar window, in [0, 1]."""
     return x.rolling(int(n), min_periods=int(n)).apply(
-        lambda w: (w.argsort().argsort()[-1] + 1) / len(w), raw=False)
+        lambda w: float((w <= w[-1]).mean()), raw=True)   # raw=True -> w is ndarray, w[-1] is current
 
 
 # ---- helpers the evolved code may find handy --------------------------------
@@ -130,6 +140,6 @@ def clip_signal(sig: pd.Series) -> pd.Series:
 # Names exposed to the LLM in the prompt (see prompt.py).
 TOOL_NAMES = [
     "sma", "ema", "roc", "zscore", "rsi", "realized_vol", "vol_target_scale",
-    "rolling_high", "rolling_low", "breakout", "vix_regime", "pctile_rank",
-    "crossover", "clip_signal",
+    "rolling_high", "rolling_low", "breakout", "vol_regime",
+    "pctile_rank", "crossover", "clip_signal",
 ]

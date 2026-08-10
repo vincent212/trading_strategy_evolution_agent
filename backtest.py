@@ -60,6 +60,31 @@ def _sharpe_arr(r: np.ndarray, min_obs: int = 20) -> float:
     return float(r.mean() / sd * np.sqrt(PERIODS_PER_YEAR))
 
 
+def _ann_return_arr(r: np.ndarray, min_obs: int = 20) -> float:
+    """Annualized (arithmetic) mean return of a net-return stream — smooth for optimizing."""
+    r = r[np.isfinite(r)]
+    if r.size < min_obs:
+        return 0.0
+    m = r.mean()
+    return float(m * PERIODS_PER_YEAR) if np.isfinite(m) else 0.0
+
+
+def _score_arr(r: np.ndarray, objective: str = "sharpe",
+               min_sharpe: float = 0.8, penalty: float = 10.0) -> float:
+    """The scalar the search MAXIMIZES for a return stream.
+      objective='sharpe' -> annualized Sharpe (default; the original behaviour).
+      objective='return' -> annualized return, but SOFT-penalized below a Sharpe floor, so the
+                            fit prefers return among strategies that keep Sharpe >= min_sharpe.
+    """
+    if objective == "sharpe":
+        return _sharpe_arr(r)
+    sh = _sharpe_arr(r)
+    ret = _ann_return_arr(r)
+    if sh >= min_sharpe:
+        return ret
+    return ret - penalty * (min_sharpe - sh)     # pull the fit back toward the Sharpe floor
+
+
 # ---- quarter cross-validation splits ---------------------------------------
 
 def make_quarter_splits(index: pd.DatetimeIndex, n_splits: int = 100,
@@ -87,73 +112,79 @@ def make_quarter_splits(index: pd.DatetimeIndex, n_splits: int = 100,
 
 def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
                 mask: np.ndarray, budget: int = 200, cost: float = 0.0005,
-                seed: int = 0) -> dict:
-    """Tune params to MAXIMIZE Sharpe over the `mask` dates via differential evolution.
+                seed: int = 0, objective: str = "sharpe", min_sharpe: float = 0.8) -> dict:
+    """Tune params to MAXIMIZE the objective over the `mask` dates via differential evolution.
     Returns the fitted params dict (empty if the strategy declares no parameters)."""
     names, bounds, kinds, extra = P.parse_space(space)
     close = data["close"]
     if not bounds:
         return {}
 
-    def neg_sharpe(x):
+    def neg_score(x):
         p = P.decode(x, names, kinds, extra)
         try:
             r = run_backtest(strategy_fn(data, tools, p), close, cost).to_numpy()
-            return -_sharpe_arr(r[mask])
+            return -_score_arr(r[mask], objective, min_sharpe)
         except Exception:
             return 10.0
 
     popsize = 8
     maxiter = max(1, int(round(budget / (popsize * len(bounds)))) - 1)
     res = differential_evolution(
-        neg_sharpe, bounds, popsize=popsize, maxiter=maxiter, seed=seed,
+        neg_score, bounds, popsize=popsize, maxiter=maxiter, seed=seed,
         polish=False, tol=0.01, mutation=(0.5, 1.0), recombination=0.7)
     return P.decode(res.x, names, kinds, extra)
-
-
-def _oos_sharpe(strategy_fn, data, tools, p, mask, cost) -> float:
-    r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
-    return _sharpe_arr(r[mask])
 
 
 # ---- cross-validated OOS (the fitness) -------------------------------------
 
 def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
-                   cost=0.0005, jobs=1, seed=0) -> dict:
-    """Fit on each split's train quarters, score OOS on its test quarters; return the
-    median (and spread) of the per-split OOS Sharpes."""
+                   cost=0.0005, jobs=1, seed=0, objective="sharpe", min_sharpe=0.8) -> dict:
+    """Fit on each split's train quarters, score OOS on its test quarters. `median_oos` is the
+    median per-split OOS OBJECTIVE score (the fitness the evolutionary loop maximizes); the
+    OOS Sharpe and OOS annual return are always reported alongside it."""
     def one(i):
         train_mask, test_mask = splits[i]
-        p = fit_on_mask(strategy_fn, space, data, tools, train_mask, budget, cost, seed + i)
-        return _oos_sharpe(strategy_fn, data, tools, p, test_mask, cost)
+        p = fit_on_mask(strategy_fn, space, data, tools, train_mask, budget, cost,
+                        seed + i, objective, min_sharpe)
+        r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
+        rt = r[test_mask]
+        return (_score_arr(rt, objective, min_sharpe), _sharpe_arr(rt), _ann_return_arr(rt))
 
     n = len(splits)
     if jobs and jobs > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=jobs) as ex:
-            oos = list(ex.map(one, range(n)))
+            rows = list(ex.map(one, range(n)))
     else:
-        oos = [one(i) for i in range(n)]
-    oos = np.asarray(oos, dtype=float)
+        rows = [one(i) for i in range(n)]
+    rows = np.asarray(rows, dtype=float)
+    score, shp, ret = rows[:, 0], rows[:, 1], rows[:, 2]
     return {
-        "median_oos": float(np.median(oos)),
-        "mean_oos": float(np.mean(oos)),
-        "std_oos": float(np.std(oos)),
-        "frac_positive": float(np.mean(oos > 0)),
+        "median_oos": float(np.median(score)),       # fitness (objective units)
+        "mean_oos": float(np.mean(score)),
+        "std_oos": float(np.std(score)),
+        "frac_positive": float(np.mean(score > 0)),
+        "median_sharpe": float(np.median(shp)),
+        "median_return": float(np.median(ret)),
+        "objective": objective,
         "n_splits": n,
     }
 
 
-def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0) -> dict:
+def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0,
+             objective="sharpe", min_sharpe=0.8) -> dict:
     """Fit params on ALL of `data` (used for the champion before the final holdout)."""
     mask = np.ones(len(data), dtype=bool)
-    return fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed)
+    return fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed,
+                       objective, min_sharpe)
 
 
 # ---- the null-max bar (capacity gate, on the CCV OOS) -----------------------
 
 def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
-                     cost=0.0005, n_sims=10, seed=0, jobs=1, quantile=0.95) -> dict:
+                     cost=0.0005, n_sims=10, seed=0, jobs=1, quantile=0.95,
+                     objective="sharpe", min_sharpe=0.8) -> dict:
     """Run the SAME fit+CCV on sign-flipped (pure-noise) returns, n_sims times, and
     return a high quantile of the resulting median-OOS values as the noise ceiling.
 
@@ -172,7 +203,8 @@ def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
         fdata = data.copy()
         fdata["close"] = fake_close
         res = ccv_median_oos(strategy_fn, space, fdata, tools, splits, budget,
-                             cost, jobs, seed=10_000 + s)
+                             cost, jobs, seed=10_000 + s, objective=objective,
+                             min_sharpe=min_sharpe)
         meds[s] = res["median_oos"]
     return {
         "bar": float(np.quantile(meds, quantile)),

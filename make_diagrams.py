@@ -87,7 +87,7 @@ def fig_loop():
         "median out-of-sample Sharpe", fc=GRAYBG, ec=GRAYED)
 
     arrow(ax, cx, 0.775, cx, 0.695)
-    label(ax, 0.71, 0.735, "pick 2 of the\nbest 'parents'")
+    label(ax, 0.71, 0.735, "show it every\nstrategy tried,\nbest first")
     arrow(ax, cx, 0.545, cx, 0.455)
     label(ax, 0.71, 0.500, "a new\n'child' strategy")
 
@@ -147,45 +147,112 @@ def numbered(ax, x, y, n, color):
 
 
 def fig_gauntlet():
-    fig, ax = new_ax(13, 6.6)
-    ax.text(0.5, 0.95, "Evaluation: fit, cross-validate, gate, hold out",
-            ha="center", fontsize=18.5, fontweight="bold", color=INK)
+    fig, ax = new_ax(13, 6.8)
+    ax.text(0.5, 0.95, "The keep / reject decision uses only pre-2026 data",
+            ha="center", fontsize=18, fontweight="bold", color=INK)
 
-    w, gap = 0.19, 0.028
-    x0 = (1 - (4 * w + 3 * gap)) / 2
-    y, h = 0.32, 0.44
-    cards = [
-        (BLUE, BLUEBG, "Fit",
-         "Tune the parameters\non 75% of the\nquarters (max Sharpe)."),
-        (GREEN, GREENBG, "Cross-validate",
-         "Score on the other\n25%. Repeat 100x.\nTake the MEDIAN\nout-of-sample Sharpe."),
-        (AMBER, AMBERBG, "Null-max bar",
-         "Refit on sign-flipped\nnoise; the real median\nmust beat what noise\ncan fake."),
-        (INK, GRAYBG, "2026 held out",
-         "Scored once on this\nyear — never seen by\nthe search or the bar."),
+    w, gap = 0.20, 0.035
+    x0 = 0.05
+    y, h = 0.46, 0.28
+    steps = [
+        (BLUE, BLUEBG, "Fit", "tune the params on\n75% of the quarters"),
+        (GREEN, GREENBG, "Cross-validate", "median OOS Sharpe\nover 100 splits"),
+        (AMBER, AMBERBG, "Null-max bar", "must beat the\nnoise ceiling"),
     ]
-    for i, (ec, fc, title, body) in enumerate(cards):
+    for i, (ec, fc, title, body) in enumerate(steps):
         x = x0 + i * (w + gap)
         box(ax, x, y, w, h, "", fc=fc, ec=ec, lw=1.8)
         numbered(ax, x + w / 2, y + h - 0.05, i + 1, ec)
-        ax.text(x + w / 2, y + h - 0.125, title, ha="center", fontsize=14.5,
+        ax.text(x + w / 2, y + h - 0.115, title, ha="center", fontsize=14,
                 color=ec, fontweight="bold")
-        ax.text(x + w / 2, y + h * 0.40, body, ha="center", va="center",
+        ax.text(x + w / 2, y + h * 0.36, body, ha="center", va="center",
                 fontsize=11, color=INK, linespacing=1.4)
-        if i < 3:
-            arrow(ax, x + w + 0.002, y + h / 2, x + w + gap - 0.002, y + h / 2, MUTE, lw=1.8)
+        if i < 2:
+            arrow(ax, x + w + 0.003, y + h / 2, x + w + gap - 0.003, y + h / 2, MUTE, lw=1.8)
 
-    arrow(ax, 0.045, y + h / 2, x0 - 0.006, y + h / 2, MUTE)
-    ax.text(0.032, y + h / 2 + 0.075, "a\nstrategy", ha="center", va="center",
+    # bracket: the three decision steps all run on pre-2026 data
+    bx0, bx1 = x0, x0 + 3 * w + 2 * gap
+    ax.plot([bx0, bx0, bx1, bx1],
+            [y + h + 0.035, y + h + 0.06, y + h + 0.06, y + h + 0.035], color=MUTE, lw=1.2)
+    ax.text((bx0 + bx1) / 2, y + h + 0.10, "all on pre-2026 data (2017–2025)",
+            ha="center", fontsize=12, color=MUTE, style="italic")
+
+    # decision node — fed only by steps 1-3
+    dx, dw = bx1 + gap, 0.16
+    box(ax, dx, y + 0.04, dw, h - 0.08, "KEEP\nor REJECT", fc=WHITE, ec=INK, title_fs=14)
+    arrow(ax, bx1 + 0.003, y + h / 2, dx - 0.003, y + h / 2, INK, lw=2.0)
+    dcx = dx + dw / 2
+
+    # strategy in
+    arrow(ax, 0.008, y + h / 2, x0 - 0.006, y + h / 2, MUTE)
+    ax.text(0.0, y + h / 2 + 0.075, "a\nstrategy", ha="left", va="center",
             fontsize=10.5, color=MUTE, linespacing=1.2)
-    arrow(ax, x0 + 4 * w + 3 * gap + 0.006, y + h / 2, 0.965, y + h / 2, GREEN)
-    ax.text(0.955, y + h / 2 + 0.065, "KEEP", ha="center", fontsize=13,
-            color=GREEN, fontweight="bold")
-    ax.text(0.5, 0.15, "Steps 1–2 are the fitness the search maximizes; step 3 is the pass/fail gate; step 4 is the final untouched number.",
-            ha="center", fontsize=12, color=MUTE)
+
+    # 2026 held out — SEPARATE, report-only, not wired into the decision
+    ty, th = 0.13, 0.12
+    box(ax, dcx - 0.12, ty, 0.24, th, "2026  —  held out", "measured once, only if kept",
+        fc=GRAYBG, ec=GRAYED, tc=INK, title_fs=13, sub_fs=10.5)
+    ax.add_patch(FancyArrowPatch((dcx, y + 0.04), (dcx, ty + th), arrowstyle="-|>",
+                 mutation_scale=15, lw=1.6, color=MUTE, linestyle=(0, (4, 3))))
+    ax.text(dcx - 0.02, (y + 0.04 + ty + th) / 2, "report only —\nnot part of the\ndecision",
+            ha="right", va="center", fontsize=10, color=MUTE, linespacing=1.25)
+
+    ax.text(0.5, 0.03, "2026 never touches the search, the fit, the cross-validation, or the null-max bar — "
+            "it only shows how the kept strategy did on an unseen year.",
+            ha="center", fontsize=11.5, color=MUTE)
     save(fig, "04_gauntlet.png")
 
 
+def fig_combine():
+    fig, ax = new_ax(12.5, 6.4)
+    ax.text(0.5, 0.93, "Two jobs: the model wires the tools, the optimizer sets the numbers",
+            ha="center", fontsize=17, fontweight="bold", color=INK)
+    yc = 0.55
+    lw, lh = 0.27, 0.30
+
+    box(ax, 0.02, yc - 0.10, 0.16, 0.20, "Alpha tools",
+        "sma · rsi · vol_regime\nbreakout · … (fixed)",
+        fc=GRAYBG, ec=GRAYED, tc=INK, title_fs=12.5, sub_fs=9)
+
+    lx = 0.235
+    box(ax, lx, yc - 0.15, lw, lh, "", fc=BLUEBG, ec=BLUE)
+    ax.text(lx + lw / 2, yc + 0.10, "LANGUAGE MODEL", ha="center", fontsize=13.5,
+            color=BLUE, fontweight="bold")
+    ax.text(lx + lw / 2, yc + 0.045, "decides HOW to combine them", ha="center", fontsize=10, color=INK)
+    ax.text(lx + lw / 2, yc - 0.02, "w1·trend + w2·(dip × vol_regime)", ha="center",
+            fontsize=9, family="monospace", color=INK)
+    ax.text(lx + lw / 2, yc - 0.075, "params left as symbols", ha="center", fontsize=8.5,
+            color=MUTE, style="italic")
+    ax.text(lx + lw / 2, yc + 0.185, "the model's ONLY job", ha="center", fontsize=10.5,
+            color=BLUE, style="italic")
+
+    ox = 0.535
+    box(ax, ox, yc - 0.15, lw, lh, "", fc=GREENBG, ec=GREEN)
+    ax.text(ox + lw / 2, yc + 0.10, "OPTIMIZER", ha="center", fontsize=13.5,
+            color=GREEN, fontweight="bold")
+    ax.text(ox + lw / 2, yc + 0.045, "differential evolution: the numbers", ha="center", fontsize=10, color=INK)
+    ax.text(ox + lw / 2, yc - 0.02, "fast=41  w1=0.10  w2=−0.74", ha="center",
+            fontsize=9, family="monospace", color=INK)
+    ax.text(ox + lw / 2, yc - 0.075, "fitted per split", ha="center", fontsize=8.5,
+            color=MUTE, style="italic")
+    ax.text(ox + lw / 2, yc + 0.185, "never the model", ha="center", fontsize=10.5,
+            color=GREEN, style="italic")
+
+    box(ax, 0.845, yc - 0.10, 0.13, 0.20, "SCORE", "median OOS\nSharpe",
+        fc=AMBERBG, ec=AMBER, tc=AMBER, title_fs=12.5, sub_fs=9.5)
+
+    arrow(ax, 0.18, yc, lx - 0.004, yc, MUTE)
+    arrow(ax, lx + lw + 0.004, yc, ox - 0.004, yc, MUTE)
+    arrow(ax, ox + lw + 0.004, yc, 0.845 - 0.004, yc, MUTE)
+
+    line(ax, 0.91, yc - 0.10, 0.91, 0.12, AMBER)
+    line(ax, 0.91, 0.12, 0.10, 0.12, AMBER)
+    arrow(ax, 0.10, 0.12, 0.10, yc - 0.10, AMBER)
+    ax.text(0.5, 0.085, "keep the highest-scoring combinations → the model mutates them into new ones",
+            ha="center", fontsize=10.5, color=AMBER, style="italic")
+    save(fig, "05_combine.png")
+
+
 if __name__ == "__main__":
-    fig_loop(); fig_islands(); fig_gauntlet()
+    fig_loop(); fig_islands(); fig_gauntlet(); fig_combine()
     print("\nAll diagrams written to", OUT)
