@@ -1,13 +1,8 @@
 """
-Data loader: any Yahoo Finance ticker (the asset we trade) plus ^VIX (a market
-regime input), via yfinance, cached to a local parquet so repeated runs don't
-re-hit the network.
+Data loader: any Yahoo Finance ticker (the asset we trade), via yfinance, cached
+to a local parquet so repeated runs don't re-hit the network.
 
 The traded asset is whatever `ticker` you pass — SPY, AAPL, TSLA, an ETF, etc.
-^VIX is always fetched as an auxiliary regime column; it stays useful as a
-market-fear gauge even for single names. If a ticker has no VIX overlap (or the
-VIX fetch fails), the `vix` column is left as NaN and regime tools simply return
-neutral for that stock.
 """
 from __future__ import annotations
 import os
@@ -23,12 +18,10 @@ def _safe(name: str) -> str:
 
 
 def get_data(ticker: str = "SPY", start: str = "2005-01-01", end: str | None = None,
-             refresh: bool = False, include_vix: bool = True) -> pd.DataFrame:
+             refresh: bool = False) -> pd.DataFrame:
     """
-    Return a DataFrame indexed by date with columns:
-        close : `ticker` adjusted close (the asset traded)
-        vix   : ^VIX close, forward-filled onto the asset's calendar
-                (all-NaN if include_vix is False or the VIX fetch is empty)
+    Return a DataFrame indexed by date with a single column:
+        close : `ticker` split/dividend-adjusted close (the asset traded)
 
     Cached to .cache/<ticker>_<start>_<end>.parquet.
     """
@@ -52,18 +45,6 @@ def get_data(ticker: str = "SPY", start: str = "2005-01-01", end: str | None = N
         return df[name]
 
     df = pd.DataFrame({"close": _col(asset, "Close")})
-
-    df["vix"] = pd.NA
-    if include_vix:
-        try:
-            vix = yf.download("^VIX", start=start, end=end, auto_adjust=False,
-                              progress=False)
-            if not vix.empty:
-                df["vix"] = _col(vix, "Close").reindex(df.index).ffill()
-        except Exception:
-            pass  # leave vix as NaN; regime tools return neutral
-
-    df["vix"] = pd.to_numeric(df["vix"], errors="coerce")
     df = df.dropna(subset=["close"]).copy()
     df.to_parquet(path)
     return df
