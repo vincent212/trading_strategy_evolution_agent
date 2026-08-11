@@ -126,7 +126,8 @@ def _norm_code(code: str) -> str:
 class Evolver:
     def __init__(self, data, splits, client, model=MODEL, n_islands=4, k_parents=2,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
-                 objective="sharpe", min_sharpe=0.8):
+                 objective="sharpe", min_sharpe=0.8,
+                 null_gate=True, null_gate_configs=64, null_gate_shifts=50):
         self.data = data
         self.splits = splits
         self.client = client
@@ -136,6 +137,26 @@ class Evolver:
         self.cost = cost
         self.objective = objective
         self.min_sharpe = min_sharpe
+        # per-candidate SELECTION-AWARE SHIFT-THE-SIGNAL skill p-value (REPORT-ONLY — does NOT
+        # filter selection). For every candidate we sample null_gate_configs configs of its
+        # structure, take the MAX in-sample score over them (the selection the search does), and
+        # compare it to that same max under a fixed set of random circular SHIFTS of the positions.
+        # Shifting keeps returns and each config's exposure profile exactly and destroys only the
+        # signal<->return alignment, so drift and exposure level cancel and only timing skill is
+        # tested. p = fraction of shifted maxima >= the real max. Selection is still by CV
+        # median-OOS fitness; this p-value is logged and headlined only. Shift offsets are fixed
+        # once (common random numbers) so the bar is a consistent comparison across candidates.
+        self.null_gate = null_gate
+        self.null_gate_configs = null_gate_configs
+        self.null_gate_shifts = null_gate_shifts
+        self.n_skill_significant = 0       # candidates with skill p < 0.05
+        self._last_skill_p = float("nan")  # most recent candidate's skill p-value (for logging)
+        self._last_is = float("nan")       # its (max-over-configs) real in-sample score
+        self._shift_offsets = None
+        if null_gate:
+            n = len(self.data)
+            self._shift_offsets = np.random.default_rng(seed).integers(
+                1, max(2, n), size=null_gate_shifts)
         self.jobs = jobs
         self.seed_val = seed
         self.tools = alpha_tools_module()
@@ -205,6 +226,26 @@ class Evolver:
             self.n_rejected += 1
             self._code_cache[ckey] = None
             return None
+        # REPORT-ONLY selection-aware shift-the-signal SKILL p-value (does NOT affect selection).
+        # Attached to diagnostics and logged; the champion gets a higher-resolution version at the end.
+        diag["skill_pvalue"] = float("nan")
+        self._last_skill_p, self._last_is = float("nan"), float("nan")
+        if self.null_gate:
+            try:
+                res = bt.shift_null_pvalue(strat, space, self.data, self.tools,
+                                           n_configs=self.null_gate_configs,
+                                           shift_offsets=self._shift_offsets,
+                                           cost=self.cost, seed=self.seed_val,
+                                           objective=self.objective, min_sharpe=self.min_sharpe)
+                diag["skill_pvalue"] = res["pvalue"]
+                diag["gate_real"] = res["real"]
+                diag["gate_null_q95"] = res["null_q95"]
+                diag["gate_exposure"] = res["exposure"]
+                self._last_skill_p, self._last_is = res["pvalue"], res["real"]
+                if res["pvalue"] < 0.05:
+                    self.n_skill_significant += 1
+            except Exception:
+                pass                                    # p-value is diagnostic; never block on it
         self.n_evaluated += 1
         prog = Program(code, float(score), diag, space)
         self._code_cache[ckey] = prog
@@ -333,11 +374,14 @@ class Evolver:
             if it % log_every == 0:
                 cs = ("dup" if self._last_cached else
                       (f"{child.score:+.3f}" if child else "REJECT"))
+                skp = (f" skill_p={self._last_skill_p:.2f}"
+                       if child is not None and np.isfinite(self._last_skill_p) else "")
                 tag = " EXPLORE" if self._last_explore else ""
-                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}  "
+                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}{skp}  "
                          f"pop={len(self.db.all_programs())} rej={self.n_rejected} "
-                         f"dup={self.n_dup} fixed={self.n_selfcorrected}")
-                if self._last_code:                       # show what the model actually wrote
+                         f"sig={self.n_skill_significant} dup={self.n_dup} "
+                         f"fixed={self.n_selfcorrected}")
+                if self._last_code:
                     body = "\n".join("      " + ln for ln in self._last_code.strip().splitlines())
-                    self.log(f"    child code (score={cs}):\n{body}")
+                    self.log(f"    child code (score={cs}{skp}):\n{body}")
         return self.db.best()

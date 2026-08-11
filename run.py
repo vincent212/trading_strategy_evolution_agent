@@ -40,6 +40,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                n_splits=100, fit_budget=200, champion_budget=400, null_sims=10,
                headroom=1.5, holdout_year=2026, reset_every=50, jobs=1, seed=0,
                objective="sharpe", min_sharpe=0.8,
+               null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
     out_dir = out_dir or os.path.join(os.path.dirname(__file__), "runs")
@@ -66,10 +67,15 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     splits = bt.make_quarter_splits(pool.index, n_splits=n_splits, train_frac=0.75, seed=seed)
 
     log(f"objective: {objective}" + (f" (min Sharpe {min_sharpe})" if objective == "return" else ""))
+    log(f"shift-the-signal skill p-value (report-only): " + ("ON" if null_gate else "OFF")
+        + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} random shifts, "
+           f"common random numbers; selection stays fitness-driven)" if null_gate else ""))
     ev = evolve_mod.Evolver(pool, splits, client, model=model, n_islands=n_islands,
                             k_parents=k_parents, fit_budget=fit_budget, cost=cost,
                             jobs=jobs, seed=seed, log=log,
-                            objective=objective, min_sharpe=min_sharpe)
+                            objective=objective, min_sharpe=min_sharpe,
+                            null_gate=null_gate, null_gate_configs=null_gate_configs,
+                            null_gate_shifts=null_gate_shifts)
     ev.seed(SEEDS)                              # four different families, one per island
     best = ev.run(iterations, reset_every=reset_every)
     if best is None:
@@ -79,24 +85,44 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     strat, space = evolve_mod.compile_strategy(best.code)
     median_oos = float(best.diagnostics["median_oos"])
 
-    # null-max bar: best median-OOS the same search extracts from sign-flipped noise
-    log("computing null-max bar ...")
-    nb = bt.null_max_bar_ccv(strat, space, pool, tools, splits, budget=fit_budget,
-                             cost=cost, n_sims=null_sims, seed=seed, jobs=jobs,
-                             objective=objective, min_sharpe=min_sharpe)
-    bar = float(nb["bar"])
-    passes = (median_oos > 0.0) and (median_oos >= headroom * max(bar, 0.0))
+    # champion SKILL p-value: selection-aware shift-the-signal test at higher resolution than the
+    # per-candidate one (more configs and shifts). This is the STATISTICAL significance check
+    # ("is the timing real?"), in-sample. Economic significance ("worth owning vs passive?") is the
+    # separate buy&hold comparison on the sealed holdout below — the two are kept distinct on purpose.
+    champ_skill = {}
+    champ_skill_p = float(best.diagnostics.get("skill_pvalue", float("nan")))
+    if null_gate:
+        log("computing champion skill p-value (selection-aware shift-the-signal) ...")
+        champ_skill = bt.shift_null_pvalue(strat, space, pool, tools,
+                                           n_configs=max(256, null_gate_configs * 4),
+                                           n_shifts=max(300, null_gate_shifts * 4),
+                                           cost=cost, seed=seed,
+                                           objective=objective, min_sharpe=min_sharpe)
+        champ_skill_p = float(champ_skill["pvalue"])
 
     # final: fit champion on all pool, measure once on the held-out year
     p_full = bt.fit_full(strat, space, pool, tools, budget=champion_budget, cost=cost, seed=seed,
                          objective=objective, min_sharpe=min_sharpe)
     hold_sharpe = hold_return = None
+    hold_by_year = {}                                   # per held-out year: strategy vs buy&hold
     if len(hold) > 20:
-        full_ret = bt.run_backtest(strat(full, tools, p_full), full["close"], cost)
-        hm = np.asarray(full.index.year >= holdout_year)
-        hr = full_ret.to_numpy()[hm]
+        years = np.asarray(full.index.year)
+        strat_ret = bt.run_backtest(strat(full, tools, p_full), full["close"], cost).to_numpy()
+        bh_ret = bt.run_backtest(strat(full, tools, p_full).clip(1.0, 1.0),
+                                 full["close"], cost).to_numpy()   # always-long benchmark
+        hm = years >= holdout_year
+        hr = strat_ret[hm]
         hold_sharpe = bt._sharpe_arr(hr)
         hold_return = float(np.prod(1.0 + hr[np.isfinite(hr)]) - 1.0)   # total holdout return
+        for y in sorted(set(years[hm].tolist())):
+            ym = years == y
+            sr, br = strat_ret[ym], bh_ret[ym]
+            hold_by_year[str(int(y))] = {
+                "strategy_sharpe": bt._sharpe_arr(sr),
+                "strategy_return": float(np.prod(1.0 + sr[np.isfinite(sr)]) - 1.0),
+                "buyhold_sharpe": bt._sharpe_arr(br),
+                "buyhold_return": float(np.prod(1.0 + br[np.isfinite(br)]) - 1.0),
+            }
 
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -106,6 +132,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                        cost=cost, headroom=headroom, holdout_year=holdout_year,
                        objective=objective, min_sharpe=min_sharpe),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
+                       skill_significant=ev.n_skill_significant,
                        population=len(ev.db.all_programs())),
         "champion": {
             "code": best.code,
@@ -117,12 +144,18 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
             "frac_positive_splits": float(best.diagnostics.get("frac_positive", float("nan"))),
             "holdout_year_sharpe": hold_sharpe,
             "holdout_year_return": hold_return,
+            "holdout_by_year": hold_by_year,
+            "skill_pvalue": champ_skill_p,
         },
-        "null_max_bar": {
-            "bar": bar,
-            "headroom_required": headroom,
-            "mean_noise_median": float(nb["mean_noise_median"]),
-            "PASSES": bool(passes),
+        "skill_test": {
+            "method": "selection-aware shift-the-signal (in-sample)",
+            "pvalue": champ_skill_p,
+            "significant": bool(champ_skill_p < 0.05) if champ_skill_p == champ_skill_p else None,
+            "real_max_score": float(champ_skill.get("real", float("nan"))),
+            "null_q95": float(champ_skill.get("null_q95", float("nan"))),
+            "avg_exposure": float(champ_skill.get("exposure", float("nan"))),
+            "n_configs": int(champ_skill.get("n_configs", 0)),
+            "n_shifts": int(champ_skill.get("n_shifts", 0)),
         },
     }
     _print_report(result, log)
@@ -137,7 +170,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
 
 
 def _print_report(r, log):
-    c, g = r["champion"], r["null_max_bar"]
+    c, g = r["champion"], r.get("skill_test", {})
     log("\n" + "=" * 70)
     log(f"CHAMPION  ({r['config']['ticker']})")
     log("=" * 70)
@@ -156,12 +189,21 @@ def _print_report(r, log):
         + ("n/a" if hs is None else f"{hs:.3f}")
         + f"   return " + ("n/a" if hr is None else f"{hr:+.1%}")
         + "   (measured once, never searched)")
+    for y, m in sorted(c.get("holdout_by_year", {}).items()):
+        log(f"  {y}: strategy Sharpe {m['strategy_sharpe']:+.2f} return {m['strategy_return']:+.1%}"
+            f"   |  buy&hold Sharpe {m['buyhold_sharpe']:+.2f} return {m['buyhold_return']:+.1%}")
     log("-" * 70)
-    log(f"null-max bar              : {g['bar']:.3f}  "
-        f"(noise-median mean {g['mean_noise_median']:.3f})")
-    log(f"verdict                   : "
-        + ("PASS" if g["PASSES"] else "REJECT")
-        + f"  (need fitness >= {g['headroom_required']} x bar)")
+    sp = c.get("skill_pvalue", float("nan"))
+    if sp == sp:                                          # not NaN
+        log(f"SKILL TEST (statistical significance, in-sample)")
+        log(f"  method                  : selection-aware shift-the-signal "
+            f"({g.get('n_configs', 0)} configs x {g.get('n_shifts', 0)} shifts)")
+        log(f"  avg exposure            : {g.get('avg_exposure', float('nan')):.0%}")
+        log(f"  skill p-value           : {sp:.3f}  "
+            + ("SIGNIFICANT timing skill (p<0.05) — beats its own shuffled timing"
+               if sp < 0.05 else
+               "NOT distinguishable from chance — random re-timing of its own positions matches it"))
+        log(f"  economic significance   : judged separately vs buy&hold on the sealed holdout above")
     log("=" * 70)
 
 
@@ -186,6 +228,12 @@ def main():
                     help="maximize Sharpe (default) or annual return subject to a Sharpe floor")
     ap.add_argument("--min-sharpe", type=float, default=0.8,
                     help="Sharpe floor when --objective return (soft-penalized below it)")
+    ap.add_argument("--no-null-gate", dest="null_gate", action="store_false",
+                    help="disable the per-candidate shift-the-signal skill p-value (report-only)")
+    ap.add_argument("--null-gate-configs", type=int, default=64,
+                    help="configs sampled per candidate for the selection-aware skill test")
+    ap.add_argument("--null-gate-shifts", type=int, default=50,
+                    help="random circular shifts for the skill test (common random numbers)")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--refresh-data", action="store_true")
@@ -196,6 +244,8 @@ def main():
                null_sims=a.null_sims, headroom=a.headroom, holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe,
+               null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
+               null_gate_shifts=a.null_gate_shifts,
                refresh_data=a.refresh_data)
 
 

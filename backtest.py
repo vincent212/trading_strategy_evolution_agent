@@ -180,28 +180,156 @@ def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0,
                        objective, min_sharpe)
 
 
+# ---- in-sample (no-CV) null-max bar: the per-candidate monkeys gate ----------
+
+def insample_score(strategy_fn, space, data, tools, budget=200, cost=0.0005, seed=0,
+                   objective="sharpe", min_sharpe=0.8) -> float:
+    """Fit params on ALL of `data` and score on that SAME data — the in-sample (no-CV) score."""
+    mask = np.ones(len(data), dtype=bool)
+    p = fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed,
+                    objective, min_sharpe)
+    r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
+    return _score_arr(r[mask], objective, min_sharpe)
+
+
+# ---- selection-aware SHIFT-THE-SIGNAL skill test (the real per-candidate gate) --------------
+
+def sample_configs(space, n_configs=64, seed=0):
+    """Sample n_configs parameter dicts uniformly from the structure's param space.
+    A parameterless structure (e.g. buy & hold) yields exactly one config."""
+    names, bounds, kinds, extra = P.parse_space(space)
+    if not bounds:
+        return [{}]
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(int(n_configs)):
+        x = np.array([rng.uniform(lo, hi) for (lo, hi) in bounds])
+        out.append(P.decode(x, names, kinds, extra))
+    return out
+
+
+def _score_position(pos, asset_ret, cost, objective, min_sharpe):
+    """Score a raw position array exactly like run_backtest: 1-bar execution lag, cost on turnover."""
+    held = np.empty_like(pos)
+    held[0] = 0.0
+    held[1:] = pos[:-1]                                   # decide t-1, hold t (no lookahead)
+    turn = np.abs(np.diff(held, prepend=0.0))
+    r = held * asset_ret - cost * turn
+    return _score_arr(r, objective, min_sharpe)
+
+
+def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offsets=None,
+                      n_shifts=50, cost=0.0005, seed=0, objective="sharpe", min_sharpe=0.8):
+    """Selection-aware SHIFT-THE-SIGNAL skill test (in-sample, per candidate).
+
+    The null keeps the asset returns and each config's exposure profile EXACTLY, and destroys ONLY
+    the alignment between signal and return by circularly shifting the position series. So the drift
+    and the exposure level cancel — the test isolates timing skill (exposure MANAGEMENT), the one
+    thing fitting can fake. Buy & hold (a constant position, unchanged by a shift) lands exactly on
+    the bar by construction, which is the correct zero point.
+
+    Selection-aware: `real` and every null draw take the MAX over the SAME n_configs sampled configs,
+    so the 'I tried many settings and kept the best' inflation appears on both sides and cancels.
+
+    p = fraction of null draws (each a max over configs under a random shift) that meet or beat the
+    real max. p<0.05 => timing skill beyond what searching this structure this hard can fake."""
+    close = data["close"]
+    asset_ret = close.pct_change().fillna(0.0).to_numpy()
+    n = len(asset_ret)
+    configs = sample_configs(space, n_configs, seed)
+    pos_list = []
+    for p in configs:
+        try:
+            sig = strategy_fn(data, tools, p)
+            pos = (sig.reindex(close.index).replace([np.inf, -np.inf], np.nan)
+                   .fillna(0.0).clip(-1.0, 1.0).to_numpy())
+        except Exception:
+            pos = np.zeros(n)
+        pos_list.append(np.ascontiguousarray(pos, dtype=float))
+
+    def maxscore(shift):
+        best = float("-inf")
+        for pos in pos_list:
+            pp = pos if shift == 0 else np.roll(pos, int(shift))
+            s = _score_position(pp, asset_ret, cost, objective, min_sharpe)
+            if s > best:
+                best = s
+        return best
+
+    real = maxscore(0)
+    if shift_offsets is None:
+        rng = np.random.default_rng(seed + 1)
+        shift_offsets = rng.integers(1, max(2, n), size=n_shifts)
+    null = np.array([maxscore(k) for k in shift_offsets], dtype=float)
+    pval = float((null >= real).mean())
+    exposure = float(np.mean([np.mean(np.abs(pp)) for pp in pos_list])) if pos_list else float("nan")
+    return {"pvalue": pval, "real": float(real), "null_mean": float(null.mean()),
+            "null_sd": float(null.std()), "null_q95": float(np.quantile(null, 0.95)),
+            "n_configs": len(configs), "n_shifts": int(len(null)), "exposure": exposure}
+
+
+def build_null_closes(returns, index, n_paths=50, block=21, seed=0, base=100.0):
+    """Circular block-bootstrap of `returns` -> n_paths fake 'close' Series.
+
+    Why not sign-flip: flipping signs forces E[return]=0, so the null has NO DRIFT. On a
+    trending asset (NVDA pool ~1.2 Sharpe) that makes the bar trivially beatable by anything
+    net-long — even parameter-free buy & hold clears it. A block bootstrap PRESERVES the drift,
+    the volatility clustering and short-range autocorrelation, while DESTROYING the long-range
+    timing structure a strategy would need real skill to exploit. So the monkeys get the drift
+    too, and only genuine timing skill clears the bar.
+
+    Generated ONCE and reused for every candidate (COMMON RANDOM NUMBERS): the gate threshold is
+    then a consistent comparison across candidates, not noise re-randomised per candidate (which
+    would give two identical structures opposite verdicts)."""
+    r = np.asarray(returns, dtype=float)
+    T = len(r)
+    rng = np.random.default_rng(seed)
+    closes = []
+    for _ in range(int(n_paths)):
+        out = np.empty(T)
+        i = 0
+        while i < T:
+            s = int(rng.integers(0, T))
+            L = min(int(block), T - i)
+            out[i:i + L] = r[(s + np.arange(L)) % T]     # circular block
+            i += L
+        closes.append(pd.Series(base * np.cumprod(1.0 + out), index=index))
+    return closes
+
+
+def insample_null_scores(strategy_fn, space, real_data, tools, null_closes,
+                         budget=200, cost=0.0005, seed=0,
+                         objective="sharpe", min_sharpe=0.8) -> np.ndarray:
+    """In-sample score of ONE structure on each precomputed null close path. Same
+    fit-then-score-on-the-same-data procedure as the real in-sample score, so the overfitting is
+    matched and cancels — a legitimate permutation test. The caller compares the real in-sample
+    score to (mean + c*sd) of these draws (ADDITIVE, sign-safe — a multiplicative bar inverts
+    when the score is negative, which the return-minus-Sharpe-penalty objective is routinely)."""
+    vals = np.empty(len(null_closes))
+    for j, fc in enumerate(null_closes):
+        fdata = real_data.copy()
+        fdata["close"] = fc
+        vals[j] = insample_score(strategy_fn, space, fdata, tools, budget, cost,
+                                 seed + j, objective, min_sharpe)
+    return vals
+
+
 # ---- the null-max bar (capacity gate, on the CCV OOS) -----------------------
 
 def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
                      cost=0.0005, n_sims=10, seed=0, jobs=1, quantile=0.95,
-                     objective="sharpe", min_sharpe=0.8) -> dict:
-    """Run the SAME fit+CCV on sign-flipped (pure-noise) returns, n_sims times, and
-    return a high quantile of the resulting median-OOS values as the noise ceiling.
+                     objective="sharpe", min_sharpe=0.8, block=21) -> dict:
+    """Run the SAME fit+CCV on drift-preserving block-bootstrap nulls, n_sims times, and return
+    the noise ceiling (both a high quantile and mean/sd for an additive verdict).
 
-    A real strategy's median OOS Sharpe must clear this bar: on genuine noise, fitting
-    the train quarters cannot generalize to the test quarters, so the median-OOS the
-    search can achieve here is what luck alone buys. Fed the CCV OOS number, not an
-    in-sample one.
-    """
-    ret = data["close"].pct_change().fillna(0.0).to_numpy()
-    idx = data.index
-    rng = np.random.default_rng(seed)
+    Uses the block bootstrap, NOT sign-flip: sign-flip zeroed the drift and made this bar
+    trivially beatable by any net-long strategy on a trending asset (see build_null_closes)."""
+    closes = build_null_closes(data["close"].pct_change().fillna(0.0).to_numpy(),
+                               data.index, n_sims, block, seed)
     meds = np.empty(n_sims)
-    for s in range(n_sims):
-        eps = rng.choice([-1.0, 1.0], size=len(ret))
-        fake_close = pd.Series(100.0 * np.cumprod(1.0 + ret * eps), index=idx)
+    for s, fc in enumerate(closes):
         fdata = data.copy()
-        fdata["close"] = fake_close
+        fdata["close"] = fc
         res = ccv_median_oos(strategy_fn, space, fdata, tools, splits, budget,
                              cost, jobs, seed=10_000 + s, objective=objective,
                              min_sharpe=min_sharpe)
@@ -209,6 +337,7 @@ def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
     return {
         "bar": float(np.quantile(meds, quantile)),
         "mean_noise_median": float(meds.mean()),
+        "std_noise_median": float(meds.std()),
         "max_noise_median": float(meds.max()),
         "n_sims": int(n_sims),
     }
