@@ -43,6 +43,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                objective="sharpe", min_sharpe=0.8, vs_buyhold=True, max_leverage=1.0,
                theme_file=None,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
+               skill_gate=False, skill_pmax=0.10,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
     out_dir = out_dir or os.path.join(os.path.dirname(__file__), "runs")
@@ -71,9 +72,11 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     log(f"objective: {objective}" + (f" (min Sharpe {min_sharpe})" if objective == "return" else "")
         + (f"  |  fitness = risk-adjusted OUTPERFORMANCE of buy-and-hold (active return)"
            if vs_buyhold else "  |  fitness = raw strategy return"))
-    log(f"shift-the-signal skill p-value (report-only): " + ("ON" if null_gate else "OFF")
-        + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} random shifts, "
-           f"scored on the SAME active return; buy-and-hold -> 0)" if null_gate else ""))
+    log(f"shift-the-signal skill p-value: " + ("ON" if null_gate else "OFF")
+        + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} shifts, on the "
+           f"active return)" if null_gate else "")
+        + (f"  |  SKILL GATE: reject mutations with skill_p >= {skill_pmax:g} (no timing skill)"
+           if (null_gate and skill_gate) else "  |  report-only (no skill gate)"))
     import alpha_tools
     alpha_tools.MAX_LEVERAGE = float(max_leverage)      # position cap for clip_signal + backtest
     log(f"max leverage: {max_leverage:g}x"
@@ -90,7 +93,8 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                             objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
                             theme=theme, max_leverage=max_leverage,
                             null_gate=null_gate, null_gate_configs=null_gate_configs,
-                            null_gate_shifts=null_gate_shifts)
+                            null_gate_shifts=null_gate_shifts,
+                            skill_gate=skill_gate, skill_pmax=skill_pmax)
     ev.seed(SEEDS)                              # plant the seed families into the population
     best = ev.run(iterations, reset_every=reset_every)
     if best is None:
@@ -170,6 +174,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                        objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
                        max_leverage=max_leverage),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
+                       skill_rejected=ev.n_skill_rejected,
                        skill_significant=ev.n_skill_significant,
                        population=len(ev.db.all_programs())),
         "champion": {
@@ -288,6 +293,10 @@ def main():
                     help="configs sampled per candidate for the selection-aware skill test")
     ap.add_argument("--null-gate-shifts", type=int, default=50,
                     help="random circular shifts for the skill test (common random numbers)")
+    ap.add_argument("--skill-gate", action="store_true",
+                    help="REJECT mutations with no timing skill (skill_p >= --skill-pmax); seeds exempt")
+    ap.add_argument("--skill-pmax", type=float, default=0.10,
+                    help="skill-gate threshold: keep if skill_p < this, reject (no skill) otherwise")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--refresh-data", action="store_true")
@@ -301,6 +310,7 @@ def main():
                max_leverage=a.max_leverage, theme_file=a.theme_file,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
                null_gate_shifts=a.null_gate_shifts,
+               skill_gate=a.skill_gate, skill_pmax=a.skill_pmax,
                refresh_data=a.refresh_data)
 
 

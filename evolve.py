@@ -103,7 +103,8 @@ class Evolver:
     def __init__(self, data, splits, client, model=MODEL,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
                  objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme=None,
-                 max_leverage=1.0, null_gate=True, null_gate_configs=64, null_gate_shifts=50):
+                 max_leverage=1.0, null_gate=True, null_gate_configs=64, null_gate_shifts=50,
+                 skill_gate=False, skill_pmax=0.10):
         self.data = data
         self.splits = splits
         self.client = client
@@ -132,6 +133,12 @@ class Evolver:
         self.null_gate = null_gate
         self.null_gate_configs = null_gate_configs
         self.null_gate_shifts = null_gate_shifts
+        # skill_gate: hard-REJECT mutated candidates whose outperformance is not real timing skill
+        # (shift-the-signal p >= skill_pmax) so leverage/luck strategies can't breed or win.
+        self.skill_gate = skill_gate
+        self.skill_pmax = skill_pmax
+        self.n_skill_rejected = 0
+        self._last_skill_rejected = False
         self.n_skill_significant = 0       # candidates with skill p < 0.05
         self._last_skill_p = float("nan")  # most recent candidate's skill p-value (for logging)
         self._shift_offsets = None
@@ -160,8 +167,9 @@ class Evolver:
         body = "\n".join("      " + ln for ln in code.strip().splitlines())
         self.log(f"    rejected code:\n{body}")
 
-    def evaluate(self, code):
-        """Compile, quick-check, then quarter-CCV score. None if invalid.
+    def evaluate(self, code, gate=True):
+        """Compile, quick-check, then quarter-CCV score. None if invalid. gate=True applies the
+        skill gate (reject no-timing-skill mutations); seeds pass gate=False so they always plant.
 
         Deduplicated: a strategy whose normalized code — or whose positions at the
         default params — was already seen is returned from cache and NOT re-fit.
@@ -219,8 +227,38 @@ class Evolver:
             self._log_reject("non-finite fitness (nan/inf)", code)
             self._code_cache[ckey] = None
             return None
-        # RISK PROFILE for the PROMPT — so the model optimizes with drawdown/leverage IN VIEW, not
-        # blind to it. Fit once on the full pool, backtest, record max drawdown, MAR and avg exposure.
+        # SKILL p-value — selection-aware shift-the-signal on the SAME active return, so it asks
+        # whether the OUTPERFORMANCE of buy-and-hold is real timing or just leverage/luck. With
+        # skill_gate on, a MUTATED candidate whose outperformance is NOT skill (p >= skill_pmax) is
+        # REJECTED so it can't breed or win. Seeds are exempt (gate=False) so the population always
+        # has a starting point. Computed before the risk profile so rejects skip that extra fit.
+        diag["skill_pvalue"] = float("nan")
+        self._last_skill_rejected = False
+        if self.null_gate:
+            try:
+                res = bt.shift_null_pvalue(strat, space, self.data, self.tools,
+                                           n_configs=self.null_gate_configs,
+                                           shift_offsets=self._shift_offsets,
+                                           cost=self.cost, seed=self.seed_val,
+                                           objective=self.objective, min_sharpe=self.min_sharpe,
+                                           benchmark_ret=self._bench)
+                diag["skill_pvalue"] = res["pvalue"]
+                self._last_skill_p = res["pvalue"]
+                if res["pvalue"] < 0.05:
+                    self.n_skill_significant += 1
+            except Exception as e:                      # diagnostic only: never block on an error
+                self.log(f"    skill p-value failed ({type(e).__name__}: {e})")
+            if (gate and self.skill_gate and np.isfinite(diag["skill_pvalue"])
+                    and diag["skill_pvalue"] >= self.skill_pmax):
+                self.n_skill_rejected += 1
+                self._last_skill_rejected = True
+                self._log_reject(f"NO TIMING SKILL (skill_p={diag['skill_pvalue']:.2f} >= "
+                                 f"{self.skill_pmax:g}) — its outperformance of buy&hold is "
+                                 f"leverage/luck, not skill", code)
+                self._code_cache[ckey] = None           # not a code error: no self-correct
+                return None
+        # RISK PROFILE for the PROMPT (survivors only) — so the model optimizes with drawdown /
+        # leverage IN VIEW. Fit once on the full pool, backtest, record max drawdown, MAR, exposure.
         diag["maxdd"] = diag["mar"] = diag["avg_exposure"] = float("nan")
         try:
             pf = bt.fit_full(strat, space, self.data, self.tools, budget=self.fit_budget,
@@ -235,23 +273,6 @@ class Evolver:
             diag["avg_exposure"] = float(np.nanmean(np.clip(posv, -9.0, 9.0)))
         except Exception:
             pass
-        # REPORT-ONLY selection-aware shift-the-signal SKILL p-value (does NOT affect selection).
-        # Attached to diagnostics and logged; the champion gets a higher-resolution version at the end.
-        diag["skill_pvalue"] = float("nan")
-        if self.null_gate:
-            try:
-                res = bt.shift_null_pvalue(strat, space, self.data, self.tools,
-                                           n_configs=self.null_gate_configs,
-                                           shift_offsets=self._shift_offsets,
-                                           cost=self.cost, seed=self.seed_val,
-                                           objective=self.objective, min_sharpe=self.min_sharpe,
-                                           benchmark_ret=self._bench)
-                diag["skill_pvalue"] = res["pvalue"]
-                self._last_skill_p = res["pvalue"]
-                if res["pvalue"] < 0.05:
-                    self.n_skill_significant += 1
-            except Exception as e:                      # diagnostic only: never block the search,
-                self.log(f"    skill p-value failed ({type(e).__name__}: {e})")   # but surface it
         self.n_evaluated += 1
         prog = Program(code, float(score), diag, space)
         self._code_cache[ckey] = prog
@@ -265,7 +286,7 @@ class Evolver:
             seed_codes = [seed_codes]
         progs = []
         for code in seed_codes:
-            pr = self.evaluate(code)
+            pr = self.evaluate(code, gate=False)       # seeds are exempt from the skill gate
             if pr is not None:
                 progs.append(pr)
                 self.log(f"seed {len(progs)}: median_oos={pr.score:+.3f}")
@@ -384,8 +405,8 @@ class Evolver:
                 tag = " EXPLORE" if self._last_explore else ""
                 self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}{sh}{skp}  "
                          f"pop={len(self.db.all_programs())} rej={self.n_rejected} "
-                         f"sig={self.n_skill_significant} dup={self.n_dup} "
-                         f"fixed={self.n_selfcorrected}")
+                         f"skillrej={self.n_skill_rejected} sig={self.n_skill_significant} "
+                         f"dup={self.n_dup} fixed={self.n_selfcorrected}")
                 # rejects already logged their code + reason in evaluate(); print accepted/dup here
                 if self._last_code and child is not None:
                     body = "\n".join("      " + ln for ln in self._last_code.strip().splitlines())
