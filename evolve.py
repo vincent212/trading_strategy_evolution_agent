@@ -103,12 +103,13 @@ class Evolver:
     def __init__(self, data, splits, client, model=MODEL,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
                  objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme=None,
-                 null_gate=True, null_gate_configs=64, null_gate_shifts=50):
+                 max_leverage=1.0, null_gate=True, null_gate_configs=64, null_gate_shifts=50):
         self.data = data
         self.splits = splits
         self.client = client
         self.model = model
         self.theme = theme          # investment-theme paragraph injected into the system prompt
+        self.max_leverage = max_leverage
         self.fit_budget = fit_budget
         self.cost = cost
         self.objective = objective
@@ -305,8 +306,8 @@ class Evolver:
         user = prompt_mod.build_user_prompt(history, explore=explore)
         # The client (Anthropic or OpenAI-compatible) handles provider specifics,
         # including dropping temperature on models that reject it.
-        text = self.client.mutate(prompt_mod.system_prompt(self.theme), user, model=self.model,
-                                  max_tokens=1500, temperature=1.0)
+        text = self.client.mutate(prompt_mod.system_prompt(self.theme, self.max_leverage),
+                                  user, model=self.model, max_tokens=1500, temperature=1.0)
         return extract_code(text)
 
     def step(self):

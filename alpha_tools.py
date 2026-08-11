@@ -132,9 +132,16 @@ def crossover(fast: pd.Series, slow: pd.Series) -> pd.Series:
                      np.where(sign.diff() < 0, -1.0, 0.0)), index=fast.index)
 
 
+# Position cap (leverage). 1.0 = fully long/short only (default). run_search sets this per run;
+# clip_signal and the backtest both respect it, so a strategy can lever UP to MAX_LEVERAGE in
+# favorable regimes (the only way to beat buy-and-hold on total return, since B&H is 1.0 long).
+MAX_LEVERAGE = 1.0
+
+
 def clip_signal(sig: pd.Series) -> pd.Series:
-    """Clean a raw signal into a valid position in [-1, 1]."""
-    return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    """Clean a raw signal into a valid position in [-MAX_LEVERAGE, MAX_LEVERAGE]."""
+    lev = float(MAX_LEVERAGE)
+    return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-lev, lev)
 
 
 # Names exposed to the LLM in the prompt (see prompt.py).

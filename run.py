@@ -40,7 +40,8 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                model="claude-haiku-4-5", cost=0.0005,
                n_splits=100, fit_budget=200, champion_budget=400,
                holdout_year=2026, reset_every=50, jobs=1, seed=0,
-               objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme_file=None,
+               objective="sharpe", min_sharpe=0.8, vs_buyhold=True, max_leverage=1.0,
+               theme_file=None,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
@@ -73,6 +74,11 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     log(f"shift-the-signal skill p-value (report-only): " + ("ON" if null_gate else "OFF")
         + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} random shifts, "
            f"scored on the SAME active return; buy-and-hold -> 0)" if null_gate else ""))
+    import alpha_tools
+    alpha_tools.MAX_LEVERAGE = float(max_leverage)      # position cap for clip_signal + backtest
+    log(f"max leverage: {max_leverage:g}x"
+        + ("  (>1 lets a strategy beat buy-and-hold on RETURN by levering up in good regimes)"
+           if max_leverage > 1.0 else "  (fully long/short only — cannot exceed buy-and-hold exposure)"))
     bench = bt.buyhold_returns(pool["close"], cost) if vs_buyhold else None
     import prompt as prompt_mod
     theme = prompt_mod.load_theme(theme_file)
@@ -82,7 +88,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                             fit_budget=fit_budget, cost=cost,
                             jobs=jobs, seed=seed, log=log,
                             objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
-                            theme=theme,
+                            theme=theme, max_leverage=max_leverage,
                             null_gate=null_gate, null_gate_configs=null_gate_configs,
                             null_gate_shifts=null_gate_shifts)
     ev.seed(SEEDS)                              # plant the seed families into the population
@@ -145,7 +151,8 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                        model=getattr(client, "model", model), backend=client.backend,
                        n_splits=n_splits, fit_budget=fit_budget,
                        cost=cost, holdout_year=holdout_year,
-                       objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold),
+                       objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
+                       max_leverage=max_leverage),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        skill_significant=ev.n_skill_significant,
                        population=len(ev.db.all_programs())),
@@ -244,6 +251,8 @@ def main():
                     help="Sharpe floor when --objective return (soft-penalized below it)")
     ap.add_argument("--no-vs-buyhold", dest="vs_buyhold", action="store_false",
                     help="score raw strategy returns instead of active (excess-over-buy-and-hold)")
+    ap.add_argument("--max-leverage", type=float, default=1.0,
+                    help="position cap (>1 allows leverage — needed to beat buy-and-hold on return)")
     ap.add_argument("--theme-file", default=None,
                     help="investment-theme paragraph injected into the prompt (default: theme.txt)")
     ap.add_argument("--no-null-gate", dest="null_gate", action="store_false",
@@ -262,7 +271,7 @@ def main():
                holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe, vs_buyhold=a.vs_buyhold,
-               theme_file=a.theme_file,
+               max_leverage=a.max_leverage, theme_file=a.theme_file,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
                null_gate_shifts=a.null_gate_shifts,
                refresh_data=a.refresh_data)

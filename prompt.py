@@ -105,8 +105,11 @@ to resolve upward, so a low-vol dip is a good place to be MORE exposed.
 Cutting risk before bad stretches is the main way a long-biased strategy BEATS buy-and-hold.
 - Only go fully FLAT or SHORT on strong evidence (a confirmed high-vol / bearish regime) — time out \
 of the market costs you the drift, so be out only when it really matters.
+- If LEVERAGE is available (positions may exceed 1.0), concentrate it: lever UP toward the max only \
+in your highest-conviction calm uptrends, and cut hard in stress. Beating buy-and-hold on total \
+RETURN means amplifying the good regimes, not being uniformly levered.
 Because the score is OUTPERFORMANCE of buy-and-hold, you are paid for the risk you CUT in bad \
-regimes and the extra exposure you ADD at good entries — never for merely being long."""
+regimes and the extra (or levered) exposure you ADD at good entries — never for merely being long."""
 
 
 def load_theme(path: str | None = None) -> str:
@@ -124,11 +127,20 @@ def load_theme(path: str | None = None) -> str:
         return DEFAULT_THEME
 
 
-def system_prompt(theme: str | None = None) -> str:
-    """The SYSTEM message with the investment theme injected before the RULES. theme=None -> the
-    default/loaded theme; theme='' -> no theme section."""
+def system_prompt(theme: str | None = None, max_leverage: float = 1.0) -> str:
+    """The SYSTEM message with the investment theme (and a leverage note when max_leverage>1)
+    injected before the RULES. theme=None -> the default/loaded theme; theme='' -> no theme."""
     theme = DEFAULT_THEME if theme is None else theme
     block = (theme.strip() + "\n\n") if theme and theme.strip() else ""
+    if max_leverage and max_leverage > 1.0:
+        block += (
+            f"LEVERAGE IS AVAILABLE — positions may exceed fully-long: clip_signal allows up to "
+            f"±{max_leverage:g}. Buy-and-hold is exactly 1.0, so the ONLY way to beat it on RETURN "
+            f"is to be MORE than 1.0 long (up to {max_leverage:g}) in the best regimes and LESS "
+            f"(trim, cash, or short) in the worst. Return a sig >1.0 to lever up — e.g. "
+            f"`sig = 1.0 + boost*calm_uptrend - cut*high_vol` so exposure rises toward {max_leverage:g} "
+            f"in calm uptrends and falls in stress. Leverage adds volatility (lower Sharpe) but that "
+            f"is the accepted trade for beating buy-and-hold on total return.\n\n")
     return SYSTEM.replace("RULES — every one is mandatory",
                           block + "RULES — every one is mandatory", 1)
 

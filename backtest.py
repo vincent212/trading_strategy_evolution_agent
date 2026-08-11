@@ -35,9 +35,11 @@ PERIODS_PER_YEAR = 252
 def run_backtest(signal: pd.Series, close: pd.Series,
                  cost_per_turn: float = 0.0005) -> pd.Series:
     """Fitted signal -> net daily returns, with a 1-bar execution lag and costs."""
+    import alpha_tools
+    lev = float(alpha_tools.MAX_LEVERAGE)                        # same position cap as clip_signal
     asset_ret = close.pct_change().fillna(0.0)
     pos = signal.reindex(close.index).replace([np.inf, -np.inf], np.nan)
-    pos = pos.fillna(0.0).clip(-1.0, 1.0).shift(1).fillna(0.0)   # decide t-1, hold t
+    pos = pos.fillna(0.0).clip(-lev, lev).shift(1).fillna(0.0)   # decide t-1, hold t
     turnover = pos.diff().abs().fillna(0.0)
     return pos * asset_ret - cost_per_turn * turnover
 
@@ -274,8 +276,10 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
         try:
             with np.errstate(divide="ignore", invalid="ignore"):   # constant-0 signals warn benignly
                 sig = strategy_fn(data, tools, p)
+            import alpha_tools
+            lev = float(alpha_tools.MAX_LEVERAGE)
             pos = (sig.reindex(close.index).replace([np.inf, -np.inf], np.nan)
-                   .fillna(0.0).clip(-1.0, 1.0).to_numpy())
+                   .fillna(0.0).clip(-lev, lev).to_numpy())
         except Exception:
             pos = np.zeros(n)
         pos_list.append(np.asarray(pos, dtype=float))    # .to_numpy() is already C-contiguous float
