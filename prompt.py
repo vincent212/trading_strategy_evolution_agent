@@ -1,6 +1,7 @@
 """
-Builds the mutation prompt: show the LLM two high-scoring parent strategies (each a
-trainable param_space() + strategy()) and ask for an improved, distinct child.
+Builds the mutation prompt: show the LLM the whole scored history of strategies tried (each a
+trainable param_space() + strategy()) and ask for an improved, distinct child that OUTPERFORMS
+buy-and-hold — merely holding the asset scores 0.
 """
 from __future__ import annotations
 import alpha_tools  # noqa: F401 (kept for parity / future tool listing)
@@ -17,14 +18,18 @@ crossover(fast, slow) clip_signal(sig)               -- helpers"""
 SYSTEM = f"""You are a quantitative researcher evolving TRAINABLE trading strategies for a \
 single stock or ETF. The traded asset is data['close'].
 
-YOUR GOAL is to EVOLVE strategies that score higher. Each strategy is scored by its \
-median out-of-sample Sharpe across many cross-validation splits (higher is better); its \
-parameters are fit automatically before scoring, so you design only the FORM. You are shown \
-the strategies tried so far with their scores; produce a CHILD that BEATS the best of them -- \
-keep the mechanisms that scored well, drop the ones that scored poorly, and recombine them in \
-a NEW nonlinear way. The child must be a genuine variation (not a copy of one already tried) \
-and should generalize -- score well on data it was NOT fit to -- not merely fit the past. The \
-edge comes from HOW you combine the tools (see rule 2), not from any single indicator.
+YOUR GOAL is to EVOLVE strategies that OUTPERFORM BUY-AND-HOLD. Each strategy is scored by how \
+much it beats buy-and-hold, risk-adjusted, out-of-sample: the median across cross-validation \
+splits of the Sharpe of its ACTIVE return (strategy minus a constant fully-long position). \
+CRUCIAL: simply being long the stock scores ZERO — you are NOT rewarded for exposure or for the \
+stock going up. You earn ONLY by TIMING your exposure better than passively holding: be more \
+invested before good stretches and less before bad ones (step aside or short in drawdowns, lean \
+in during favorable regimes). A strategy that is always long, or long whenever a trend is up, \
+scores ~0. Parameters are fit automatically, so you design only the FORM. You are shown the \
+strategies tried so far with their scores; produce a CHILD that BEATS the best of them -- keep \
+the mechanisms that scored well, drop the ones that scored poorly, and recombine them in a NEW \
+nonlinear way. The child must generalize (score well on data it was NOT fit to), not just fit the \
+past. The edge comes from HOW you TIME exposure by combining the tools (see rule 2).
 
 Each strategy is EXACTLY two functions, with these exact signatures:
 
@@ -90,14 +95,53 @@ keep what worked, and make a real structural change (a regime switch or threshol
 repeat a structure already listed. Output ONLY one ```python code block with BOTH functions. No prose."""
 
 
+DEFAULT_THEME = """INVESTMENT THEME — design your strategies in this spirit (this is HOW good \
+single-stock strategies look; build realistic, tradeable structures like these, not exotic ones):
+- The base case for a single stock is being LONG — it drifts up over time, so most of the time you \
+should be invested. Your edge is TIMING that exposure around the base case, not avoiding it.
+- ADD / lean in on DIPS, especially when volatility is LOW — calm pullbacks inside an uptrend tend \
+to resolve upward, so a low-vol dip is a good place to be MORE exposed.
+- REDUCE or hedge exposure when volatility is HIGH or a downtrend / drawdown regime sets in. \
+Cutting risk before bad stretches is the main way a long-biased strategy BEATS buy-and-hold.
+- Only go fully FLAT or SHORT on strong evidence (a confirmed high-vol / bearish regime) — time out \
+of the market costs you the drift, so be out only when it really matters.
+Because the score is OUTPERFORMANCE of buy-and-hold, you are paid for the risk you CUT in bad \
+regimes and the extra exposure you ADD at good entries — never for merely being long."""
+
+
+def load_theme(path: str | None = None) -> str:
+    """Load the investment-theme paragraph injected into the system prompt. Reads `path`, else
+    $STRATEGY_THEME_FILE, else a `theme.txt` next to this module, else the built-in DEFAULT_THEME.
+    Editing that file swaps the theme with no code change."""
+    import os
+    p = path or os.environ.get("STRATEGY_THEME_FILE") \
+        or os.path.join(os.path.dirname(__file__), "theme.txt")
+    try:
+        with open(p) as f:
+            txt = f.read().strip()
+            return txt or DEFAULT_THEME
+    except OSError:
+        return DEFAULT_THEME
+
+
+def system_prompt(theme: str | None = None) -> str:
+    """The SYSTEM message with the investment theme injected before the RULES. theme=None -> the
+    default/loaded theme; theme='' -> no theme section."""
+    theme = DEFAULT_THEME if theme is None else theme
+    block = (theme.strip() + "\n\n") if theme and theme.strip() else ""
+    return SYSTEM.replace("RULES — every one is mandatory",
+                          block + "RULES — every one is mandatory", 1)
+
+
 def _norm(code: str) -> str:
     return "\n".join(ln.rstrip() for ln in code.strip().splitlines() if ln.strip())
 
 
 def build_user_prompt(history: list[dict], explore: bool = False) -> str:
     """history: EVERY strategy tried so far, each {code, score, diagnostics}. We show the whole
-    landscape (best first, deduplicated) with each one's median OOS Sharpe, so the model can see
-    which STRUCTURES worked and which did not — and avoid re-proposing ones already tried.
+    landscape (best first, deduplicated) with each one's outperformance-of-buy-and-hold score, so
+    the model can see which STRUCTURES beat holding and which did not — and avoid re-proposing ones
+    already tried.
 
     explore=True turns this into an EXPLORATION turn: ignore the scores, take a random jump to a
     structure unlike anything tried (to escape local optima)."""
@@ -110,8 +154,9 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
         rows.append(p)
     MAX = 24                                       # bound context: top 16 + worst 8
     shown = rows if len(rows) <= MAX else rows[:16] + rows[-8:]
-    parts = ["HISTORY — every distinct strategy tried so far and its median OOS Sharpe "
-             "(higher is better), best first. Learn which STRUCTURES win:"]
+    parts = ["HISTORY — every distinct strategy tried so far and its OUTPERFORMANCE of buy-and-hold "
+             "(median_oos = active-return score; 0 = no better than just holding the stock, higher "
+             "is better), best first. Learn which STRUCTURES actually beat buy-and-hold:"]
     for p in shown:
         d = p.get("diagnostics", {})
         parts.append(f"# median_oos={d.get('median_oos', float('nan')):+.3f}  "
@@ -130,7 +175,9 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
                 f"idea is the whole point, even if it scores worse. Do NOT copy any structure "
                 f"above. Return only the ```python code block.")
     return (f"{joined}\n\n"
-            f"The best so far is {best:+.3f}. The top entries are mostly flat linear blends that "
-            f"have plateaued — to beat them, change the STRUCTURE (add a nonlinear regime switch "
-            f"or threshold gate per rule 2), and do not repeat one already listed. Return only the "
-            f"```python code block.")
+            f"The best so far is {best:+.3f} (outperformance of buy-and-hold; 0 = no better than "
+            f"holding). Beat it by TIMING exposure better — change the STRUCTURE (a nonlinear regime "
+            f"switch or threshold gate per rule 2) so you are OUT or SHORT during bad stretches and "
+            f"invested during good ones. Remember: always-long, or long-whenever-a-trend-is-up, "
+            f"scores ~0 — the score only rewards being right about WHEN. Do not repeat a structure "
+            f"already listed. Return only the ```python code block.")

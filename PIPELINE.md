@@ -89,20 +89,24 @@ fitness = median_i(s_i)                                                         
 ## 5. The evolution loop — `evolve.py: Evolver.run / step`
 
 ```
-seed 4 islands with the seed families                # strategy_seed.py: SEEDS
+seed the population with the seed families            # strategy_seed.py: SEEDS
 for it in 1 .. iterations:
     explore = (it % 5 == 0)                           # every 5th iteration = random-jump turn
-    parents = whole scored history, best-first        # prompt.py: build_user_prompt
-    code    = LLM.mutate(system, parents)             # llm.py: Anthropic | OpenAI-compatible | subagent
+    history = whole scored history, best-first         # prompt.py: build_user_prompt
+    code    = LLM.mutate(system+theme, history)        # llm.py: Anthropic | OpenAI-compatible | subagent
     child   = evaluate(code)                           # see §6
     if child is None and it was a CODE error:
         retry up to 2× by sending the error back to the LLM   # _self_correct
-    if child survived: add to its island; update global best
-    every reset_every iterations: reset the weak islands
+    if child survived: add to the pool; update global best
+    every reset_every iterations: cull the weakest half of the pool  # db.reset()
 champion = highest-fitness program ever seen
 ```
 
-The LLM is only a **mutation operator**. It never sees prices; it sees the scored history of
+There is **one population** (no islands — see §11). The `system` prompt carries the contract + rules
++ an editable **investment-theme** paragraph (`prompt.py: system_prompt` / `theme.txt`, e.g. "mostly
+long, add on low-vol dips, cut exposure in high vol") that steers the model toward realistic
+single-stock structures. The LLM is only a **mutation operator**. It never sees prices; it sees the
+scored history of
 structures and proposes a new structure. Providers (`llm.py`): the Anthropic API, any
 OpenAI-compatible endpoint (`LLM_BASE_URL`, e.g. local Ollama), or a **Claude Code subagent** over
 a filesystem handoff (`LLM_PROVIDER=subagent`) — the NVDA runs used the subagent path, with a
@@ -232,9 +236,10 @@ the injected effect size; the qualitative gap is robust).
 | `alpha_tools.py` | fixed causal indicator library the strategies may call |
 | `params.py` | encode/sample/decode a `param_space()` for the optimizer |
 | `strategy_seed.py` | the `param_space()` + `strategy(data, tools, p)` contract and seed families |
-| `prompt.py` | mutation prompt: whole scored history → one child structure |
+| `prompt.py` | mutation prompt: contract + rules + investment theme (system) and whole scored history (user) |
+| `theme.txt` | editable investment-theme paragraph injected into the system prompt (swap without code) |
 | `backtest.py` | backtest, DE fit, quarter-CV median-OOS (active) fitness, buy&hold benchmark, shift-the-signal skill test |
-| `evolve.py` | population + islands (reset/reseed only — see §11), LLM mutation call, evaluation, report-only skill p-value |
+| `evolve.py` | single population + periodic cull, LLM mutation call (system+theme), evaluation, report-only skill p-value |
 | `run.py` | orchestration (`run_search`) + CLI; champion finalization + holdout report |
 | `llm.py` | provider shim: Anthropic, OpenAI-compatible (Ollama/etc.), or Claude Code subagent |
 
@@ -245,12 +250,11 @@ keep the default (active) for single stocks, use `--no-vs-buyhold` for assets wi
 
 ## 11. Known limitations / not yet done
 
-- **Islands are largely vestigial.** `_mutate` builds the prompt from the *whole* combined history
-  (`all_programs()`), not from one island, so the LLM sees everything regardless of island; the
-  per-island softmax parent sampler (`sample_parents`, `k_parents`) is **dead code (never called)**,
-  and there is no two-parent crossover. Effectively there is one global pool for generation; the
-  four "islands" only matter for the periodic `reset_weak_islands` cull-and-reseed. The FunSearch
-  island isolation the class docstring implies is not real — either wire it up or drop it.
+- **Islands were removed** (they were vestigial — the prompt always used the whole population and the
+  per-island parent sampler was never called, so there was no isolation and no crossover). Now a
+  single pool with a periodic cull of the weakest half (`db.reset()`). If parallel-lineage diversity
+  ever becomes the bottleneck, real island isolation (island-local prompts + migration) could be
+  added back deliberately.
 - **Low power against exposure-management skill** (§9): the skill test detects directional timing
   well but risk-control timing only ~16% of the time at a realistic effect size, so a negative
   result means "not detected," not "absent."

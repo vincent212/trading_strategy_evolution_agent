@@ -37,10 +37,10 @@ def _make_logger(out_dir, tag):
 
 
 def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
-               n_islands=4, k_parents=3, model="claude-haiku-4-5", cost=0.0005,
+               model="claude-haiku-4-5", cost=0.0005,
                n_splits=100, fit_budget=200, champion_budget=400,
                holdout_year=2026, reset_every=50, jobs=1, seed=0,
-               objective="sharpe", min_sharpe=0.8, vs_buyhold=True,
+               objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme_file=None,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
@@ -74,13 +74,18 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
         + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} random shifts, "
            f"scored on the SAME active return; buy-and-hold -> 0)" if null_gate else ""))
     bench = bt.buyhold_returns(pool["close"], cost) if vs_buyhold else None
-    ev = evolve_mod.Evolver(pool, splits, client, model=model, n_islands=n_islands,
-                            k_parents=k_parents, fit_budget=fit_budget, cost=cost,
+    import prompt as prompt_mod
+    theme = prompt_mod.load_theme(theme_file)
+    log(f"investment theme: {len(theme)} chars"
+        + (f" from {theme_file}" if theme_file else " (theme.txt / default)"))
+    ev = evolve_mod.Evolver(pool, splits, client, model=model,
+                            fit_budget=fit_budget, cost=cost,
                             jobs=jobs, seed=seed, log=log,
                             objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
+                            theme=theme,
                             null_gate=null_gate, null_gate_configs=null_gate_configs,
                             null_gate_shifts=null_gate_shifts)
-    ev.seed(SEEDS)                              # four different families, one per island
+    ev.seed(SEEDS)                              # plant the seed families into the population
     best = ev.run(iterations, reset_every=reset_every)
     if best is None:
         raise RuntimeError("no strategy survived the search")
@@ -138,7 +143,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "config": dict(ticker=ticker, start=start, iterations=iterations,
                        model=getattr(client, "model", model), backend=client.backend,
-                       n_islands=n_islands, n_splits=n_splits, fit_budget=fit_budget,
+                       n_splits=n_splits, fit_budget=fit_budget,
                        cost=cost, holdout_year=holdout_year,
                        objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
@@ -226,8 +231,6 @@ def main():
     ap.add_argument("--start", default="2017-01-01")
     ap.add_argument("--end", default=None)
     ap.add_argument("--iterations", type=int, default=300)
-    ap.add_argument("--islands", type=int, default=4)
-    ap.add_argument("--parents", type=int, default=3)
     ap.add_argument("--model", default="claude-haiku-4-5")
     ap.add_argument("--cost", type=float, default=0.0005)
     ap.add_argument("--splits", type=int, default=100)
@@ -241,6 +244,8 @@ def main():
                     help="Sharpe floor when --objective return (soft-penalized below it)")
     ap.add_argument("--no-vs-buyhold", dest="vs_buyhold", action="store_false",
                     help="score raw strategy returns instead of active (excess-over-buy-and-hold)")
+    ap.add_argument("--theme-file", default=None,
+                    help="investment-theme paragraph injected into the prompt (default: theme.txt)")
     ap.add_argument("--no-null-gate", dest="null_gate", action="store_false",
                     help="disable the per-candidate shift-the-signal skill p-value (report-only)")
     ap.add_argument("--null-gate-configs", type=int, default=64,
@@ -252,11 +257,12 @@ def main():
     ap.add_argument("--refresh-data", action="store_true")
     a = ap.parse_args()
     run_search(ticker=a.ticker, start=a.start, end=a.end, iterations=a.iterations,
-               n_islands=a.islands, k_parents=a.parents, model=a.model, cost=a.cost,
+               model=a.model, cost=a.cost,
                n_splits=a.splits, fit_budget=a.fit_budget, champion_budget=a.champion_budget,
                holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe, vs_buyhold=a.vs_buyhold,
+               theme_file=a.theme_file,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
                null_gate_shifts=a.null_gate_shifts,
                refresh_data=a.refresh_data)

@@ -1,12 +1,11 @@
 """
 Evolutionary search over trainable strategies.
 
-The program database is divided into islands (independent sub-populations). Each
-step samples two high-scoring parents from one island, asks the model for an
-improved child, evaluates the child by quarter cross-validation (fit on train
-quarters, score OOS on test quarters, median over 100 splits), and inserts it
-back into that island. Every `reset_every` steps the lower-scoring half of the
-islands are cleared and reseeded from the best strategy found so far.
+A single evolving population. Each step shows the model the WHOLE scored history, asks for an
+improved child, evaluates it by quarter cross-validation (fit on train quarters, score OOS on test
+quarters, median over 100 splits — on the active return vs buy-and-hold), and inserts it into the
+pool. Every `reset_every` steps the lower-scoring half of the pool is culled to purge stagnation
+(the champion always survives).
 
 Candidate code is executed via exec() in a restricted namespace. This is a
 constraint on convenience, not a security boundary; run only inspected code.
@@ -70,52 +69,29 @@ class Program:
 
 
 class ProgramDatabase:
-    def __init__(self, n_islands=4, temperature=0.7, seed=0):
-        self.islands: list[list[Program]] = [[] for _ in range(n_islands)]
-        self.temperature = temperature
+    """A single evolving population. `reset()` periodically culls the weakest half to purge
+    stagnation (the champion always survives). There used to be 4 'islands', but the mutation
+    prompt always drew on the whole population (all_programs), so they never isolated sub-
+    populations and had no crossover — they only ever drove this cull."""
+    def __init__(self, seed=0):
+        self.pool: list[Program] = []
         self.rng = random.Random(seed)
 
-    def add(self, island, prog):
-        self.islands[island].append(prog)
+    def add(self, prog):
+        self.pool.append(prog)
 
     def best(self):
-        allp = self.all_programs()
-        return max(allp, key=lambda p: p.score) if allp else None
+        return max(self.pool, key=lambda p: p.score) if self.pool else None
 
     def all_programs(self):
-        return [p for isl in self.islands for p in isl]
+        return list(self.pool)
 
-    def worst(self, n=2, exclude=()):
-        """The n lowest-scoring programs (for 'what did not work' examples)."""
-        ex = {id(p) for p in exclude}
-        pool = [p for p in self.all_programs() if id(p) not in ex]
-        return sorted(pool, key=lambda p: p.score)[:n]
-
-    def pick_island(self):
-        return self.rng.randrange(len(self.islands))
-
-    def sample_parents(self, island, k=2):
-        pop = self.islands[island]
-        if not pop:
-            return []
-        scores = np.array([p.score for p in pop], dtype=float)
-        w = np.exp((scores - scores.max()) / max(self.temperature, 1e-6))
-        w = w / w.sum()
-        k = min(k, len(pop))
-        idx = list(np.random.choice(len(pop), size=k, replace=False, p=w))
-        return sorted((pop[i] for i in idx), key=lambda p: p.score, reverse=True)
-
-    def reset_weak_islands(self, keep_fraction=0.5):
-        best_score = [(i, max((p.score for p in isl), default=-9.99))
-                      for i, isl in enumerate(self.islands)]
-        best_score.sort(key=lambda t: t[1])
-        n_reset = int(len(self.islands) * (1 - keep_fraction))
-        survivors = self.all_programs()
-        if not survivors:
+    def reset(self, keep_fraction=0.5):
+        """Purge stagnation: keep the top keep_fraction of the pool (champion always survives)."""
+        if len(self.pool) < 4:
             return
-        champ = max(survivors, key=lambda p: p.score)
-        for i, _ in best_score[:n_reset]:
-            self.islands[i] = [Program(champ.code, champ.score, champ.diagnostics, champ.space)]
+        self.pool.sort(key=lambda p: p.score, reverse=True)
+        self.pool = self.pool[:max(1, int(len(self.pool) * keep_fraction))]
 
 
 def _norm_code(code: str) -> str:
@@ -124,15 +100,15 @@ def _norm_code(code: str) -> str:
 
 
 class Evolver:
-    def __init__(self, data, splits, client, model=MODEL, n_islands=4, k_parents=2,
+    def __init__(self, data, splits, client, model=MODEL,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
-                 objective="sharpe", min_sharpe=0.8, vs_buyhold=True,
+                 objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme=None,
                  null_gate=True, null_gate_configs=64, null_gate_shifts=50):
         self.data = data
         self.splits = splits
         self.client = client
         self.model = model
-        self.k_parents = k_parents
+        self.theme = theme          # investment-theme paragraph injected into the system prompt
         self.fit_budget = fit_budget
         self.cost = cost
         self.objective = objective
@@ -163,7 +139,7 @@ class Evolver:
         self.jobs = jobs
         self.seed_val = seed
         self.tools = alpha_tools_module()
-        self.db = ProgramDatabase(n_islands=n_islands, seed=seed)
+        self.db = ProgramDatabase(seed=seed)
         self.log = log
         self.n_evaluated = 0
         self.n_rejected = 0
@@ -256,8 +232,7 @@ class Evolver:
         return prog
 
     def seed(self, seed_codes):
-        """Plant seeds across the islands. Accepts a single code or a list of families;
-        each working family is cycled across islands so the search starts diverse."""
+        """Plant the seed families into the population. Accepts a single code or a list."""
         if isinstance(seed_codes, str):
             seed_codes = [seed_codes]
         progs = []
@@ -268,9 +243,8 @@ class Evolver:
                 self.log(f"seed {len(progs)}: median_oos={pr.score:+.3f}")
         if not progs:
             raise RuntimeError("no seed strategy evaluated — check the contract")
-        for i in range(len(self.db.islands)):
-            pr = progs[i % len(progs)]
-            self.db.add(i, Program(pr.code, pr.score, pr.diagnostics, pr.space))
+        for pr in progs:
+            self.db.add(Program(pr.code, pr.score, pr.diagnostics, pr.space))
 
     # ---- auto-repair: deterministically fix the common 7B hygiene failures ----------------
 
@@ -331,13 +305,12 @@ class Evolver:
         user = prompt_mod.build_user_prompt(history, explore=explore)
         # The client (Anthropic or OpenAI-compatible) handles provider specifics,
         # including dropping temperature on models that reject it.
-        text = self.client.mutate(prompt_mod.SYSTEM, user, model=self.model,
+        text = self.client.mutate(prompt_mod.system_prompt(self.theme), user, model=self.model,
                                   max_tokens=1500, temperature=1.0)
         return extract_code(text)
 
     def step(self):
-        island = self.db.pick_island()
-        if not self.db.islands[island]:
+        if not self.db.all_programs():
             return None
         self._n_steps += 1
         self._last_explore = (self._n_steps % self.EXPLORE_EVERY == 0)
@@ -359,7 +332,7 @@ class Evolver:
         if child is not None and attempts > 0:
             self.n_selfcorrected += 1
         if child is not None and not self._last_cached:   # don't re-add a duplicate clone
-            self.db.add(island, child)
+            self.db.add(child)
         return child
 
     def run(self, iterations, reset_every=50, log_every=1):
@@ -372,7 +345,7 @@ class Evolver:
                 best_score = cur.score
                 self.log(f"[{it:4d}]   *** new best median_oos = {best_score:+.3f} ***")
             if it % reset_every == 0:
-                self.db.reset_weak_islands()
+                self.db.reset()
             if it % log_every == 0:
                 cs = ("dup" if self._last_cached else
                       (f"{child.score:+.3f}" if child else "REJECT"))
