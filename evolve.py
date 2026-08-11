@@ -151,7 +151,6 @@ class Evolver:
         self.null_gate_shifts = null_gate_shifts
         self.n_skill_significant = 0       # candidates with skill p < 0.05
         self._last_skill_p = float("nan")  # most recent candidate's skill p-value (for logging)
-        self._last_is = float("nan")       # its (max-over-configs) real in-sample score
         self._shift_offsets = None
         if null_gate:
             self._shift_offsets = bt.make_shift_offsets(len(self.data), null_gate_shifts, seed)
@@ -180,6 +179,7 @@ class Evolver:
         self._last_cached flags such a cache hit (so step() won't re-add a clone)."""
         import pandas as pd
         self._last_cached = False
+        self._last_skill_p = float("nan")   # reset so a dup/reject row never logs a stale p
         self._last_error = None
         code = self._repair(code)                          # deterministic hygiene fixes
         self._last_code = code                             # log/self-correct see the repaired code
@@ -227,7 +227,6 @@ class Evolver:
         # REPORT-ONLY selection-aware shift-the-signal SKILL p-value (does NOT affect selection).
         # Attached to diagnostics and logged; the champion gets a higher-resolution version at the end.
         diag["skill_pvalue"] = float("nan")
-        self._last_skill_p, self._last_is = float("nan"), float("nan")
         if self.null_gate:
             try:
                 res = bt.shift_null_pvalue(strat, space, self.data, self.tools,
@@ -236,14 +235,11 @@ class Evolver:
                                            cost=self.cost, seed=self.seed_val,
                                            objective=self.objective, min_sharpe=self.min_sharpe)
                 diag["skill_pvalue"] = res["pvalue"]
-                diag["gate_real"] = res["real"]
-                diag["gate_null_q95"] = res["null_q95"]
-                diag["gate_exposure"] = res["exposure"]
-                self._last_skill_p, self._last_is = res["pvalue"], res["real"]
+                self._last_skill_p = res["pvalue"]
                 if res["pvalue"] < 0.05:
                     self.n_skill_significant += 1
-            except Exception:
-                pass                                    # p-value is diagnostic; never block on it
+            except Exception as e:                      # diagnostic only: never block the search,
+                self.log(f"    skill p-value failed ({type(e).__name__}: {e})")   # but surface it
         self.n_evaluated += 1
         prog = Program(code, float(score), diag, space)
         self._code_cache[ckey] = prog

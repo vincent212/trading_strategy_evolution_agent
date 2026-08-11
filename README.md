@@ -10,7 +10,7 @@ An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fit
 
 - An LLM acts as the **mutation operator**, rewriting strategy structure. It never sees market data and never picks a numeric value.
 - Each candidate declares free parameters; SciPy `differential_evolution` **fits** them on the training quarters of each split.
-- Fitness is the **median out-of-sample Sharpe** over random quarter cross-validation splits, gated by a **null-max bar** (the same fit+CV rerun on sign-flipped returns). The current year (2026) is held out and measured once.
+- Fitness is the **median out-of-sample** score over random quarter cross-validation splits. Each candidate also gets a **report-only skill p-value** — a selection-aware *shift-the-signal* permutation test (does its timing beat a random re-timing of its own positions?). Selection stays fitness-driven; nothing is hard-gated. The holdout years are sealed and measured once against buy-and-hold.
 - The population evolves across **islands** with periodic resets. The objective is switchable: Sharpe, or return under a Sharpe floor.
 - The mutation model is pluggable: a local open model (Ollama), any OpenAI-compatible endpoint, the Anthropic API, or a Claude Code subagent.
 
@@ -35,7 +35,7 @@ python run.py --ticker NVDA --start 2017-01-01 --iterations 300
 - **Claude Code subagent:** `LLM_PROVIDER=subagent`.
 - **Maximize return under a Sharpe floor:** add `--objective return --min-sharpe 0.8`.
 
-Progress streams to `runs/<TICKER>_progress.log`. The champion code, its median OOS Sharpe, the null-max verdict, and the held-out 2026 number land in `runs/run_<TICKER>_*.json`.
+Progress streams to `runs/<TICKER>_progress.log`. The champion code, its median OOS fitness, its shift-the-signal skill p-value, and the sealed-holdout numbers vs buy-and-hold land in `runs/run_<TICKER>_*.json`.
 
 ## Layout
 
@@ -44,7 +44,7 @@ Progress streams to `runs/<TICKER>_progress.log`. The champion code, its median 
 | `alpha_tools.py` | fixed, causal indicator library available to strategies |
 | `strategy_seed.py` | the trainable `param_space()` + `strategy(data, tools, p)` contract and seeds |
 | `prompt.py` | the mutation prompt (whole scored history → one child) |
-| `backtest.py` | backtest, differential-evolution fit, quarter-CCV median-OOS score, null-max bar |
+| `backtest.py` | backtest, differential-evolution fit, quarter-CV median-OOS fitness, shift-the-signal skill test |
 | `evolve.py` | islands, sampling, mutation call, evaluation, repair/self-correct |
 | `run.py` | orchestration: `run_search(...)` and CLI |
 | `llm.py` | provider shim: Ollama / OpenAI-compatible / Anthropic / Claude Code subagent |

@@ -130,8 +130,8 @@ Why this null, and not the earlier ones:
   on/off pattern, autocorrelation) and destroys **only** the alignment between signal and return —
   the one thing fitting can fake. So **drift and exposure level cancel**; only timing skill is
   tested. (The earlier sign-flip null destroyed the drift and just tested "are you net long?"; the
-  block bootstrap over-corrected and was poorly calibrated. Both are abandoned. The dead
-  `build_null_closes` / `null_max_bar_ccv` helpers remain in `backtest.py` but are unused.)
+  block bootstrap over-corrected and was poorly calibrated. Both were abandoned and their helpers
+  deleted.)
 - **Selection-aware, but only w.r.t. uniform sampling**: `real` and every null draw take the max
   over the *same* P uniformly-sampled configs, so the "I tried many settings and kept the best"
   inflation appears on both sides and cancels. Caveat: the *fitness* (§4) selects with
@@ -236,5 +236,3 @@ Key CLI flags (`python run.py --help`): `--ticker --holdout-year --objective {sh
 - **`min_sharpe` penalty units** (`10×`) mix return and Sharpe; not re-tuned.
 - **Behavioural dedup** keys on the midpoint-param signal; two structures identical at midpoint but
   different elsewhere could false-merge.
-- **Dead code**: `build_null_closes`, `insample_null_scores`, `null_max_bar_ccv` (block-bootstrap
-  era) remain in `backtest.py` but are no longer called.

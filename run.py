@@ -1,6 +1,7 @@
 """
-Orchestration. Searches for a strategy on a ticker using pre-holdout data, gates the
-champion with the null-max bar, and measures it once on the held-out current year.
+Orchestration. Searches for a strategy on a ticker using pre-holdout data (selection by CV
+median-OOS fitness), annotates the champion with a report-only shift-the-signal skill p-value,
+and measures it once on the sealed holdout years against buy-and-hold. Nothing is hard-gated.
 
 Usable as a CLI (`python run.py --ticker NVDA`) or a call (`from run import run_search`).
 """
@@ -37,8 +38,8 @@ def _make_logger(out_dir, tag):
 
 def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                n_islands=4, k_parents=3, model="claude-haiku-4-5", cost=0.0005,
-               n_splits=100, fit_budget=200, champion_budget=400, null_sims=10,
-               headroom=1.5, holdout_year=2026, reset_every=50, jobs=1, seed=0,
+               n_splits=100, fit_budget=200, champion_budget=400,
+               holdout_year=2026, reset_every=50, jobs=1, seed=0,
                objective="sharpe", min_sharpe=0.8,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                refresh_data=False, out_dir=None, log=print) -> dict:
@@ -93,12 +94,15 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     champ_skill_p = float(best.diagnostics.get("skill_pvalue", float("nan")))
     if null_gate:
         log("computing champion skill p-value (selection-aware shift-the-signal) ...")
-        champ_skill = bt.shift_null_pvalue(strat, space, pool, tools,
-                                           n_configs=max(256, null_gate_configs * 4),
-                                           n_shifts=max(300, null_gate_shifts * 4),
-                                           cost=cost, seed=seed,
-                                           objective=objective, min_sharpe=min_sharpe)
-        champ_skill_p = float(champ_skill["pvalue"])
+        try:                                    # report-only diagnostic: never abort finalization
+            champ_skill = bt.shift_null_pvalue(strat, space, pool, tools,
+                                               n_configs=max(256, null_gate_configs * 4),
+                                               n_shifts=max(300, null_gate_shifts * 4),
+                                               cost=cost, seed=seed,
+                                               objective=objective, min_sharpe=min_sharpe)
+            champ_skill_p = float(champ_skill["pvalue"])
+        except Exception as e:
+            log(f"champion skill p-value failed ({type(e).__name__}: {e}); reporting n/a")
 
     # final: fit champion on all pool, measure once on the held-out year
     p_full = bt.fit_full(strat, space, pool, tools, budget=champion_budget, cost=cost, seed=seed,
@@ -106,10 +110,12 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     hold_sharpe = hold_return = None
     hold_by_year = {}                                   # per held-out year: strategy vs buy&hold
     if len(hold) > 20:
+        import pandas as pd
         years = np.asarray(full.index.year)
         strat_ret = bt.run_backtest(strat(full, tools, p_full), full["close"], cost).to_numpy()
-        bh_ret = bt.run_backtest(strat(full, tools, p_full).clip(1.0, 1.0),
-                                 full["close"], cost).to_numpy()   # always-long benchmark
+        # true always-long benchmark: a constant-1 position independent of the champion's signal.
+        # (clip(1,1) on the signal would leave the champion's own NaNs as NaN -> fillna(0) -> cash.)
+        bh_ret = bt.run_backtest(pd.Series(1.0, index=full.index), full["close"], cost).to_numpy()
         hm = years >= holdout_year
         hr = strat_ret[hm]
         hold_sharpe = bt._sharpe_arr(hr)
@@ -129,7 +135,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
         "config": dict(ticker=ticker, start=start, iterations=iterations,
                        model=getattr(client, "model", model), backend=client.backend,
                        n_islands=n_islands, n_splits=n_splits, fit_budget=fit_budget,
-                       cost=cost, headroom=headroom, holdout_year=holdout_year,
+                       cost=cost, holdout_year=holdout_year,
                        objective=objective, min_sharpe=min_sharpe),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        skill_significant=ev.n_skill_significant,
@@ -220,8 +226,6 @@ def main():
     ap.add_argument("--splits", type=int, default=100)
     ap.add_argument("--fit-budget", type=int, default=200)
     ap.add_argument("--champion-budget", type=int, default=400)
-    ap.add_argument("--null-sims", type=int, default=10)
-    ap.add_argument("--headroom", type=float, default=1.5)
     ap.add_argument("--holdout-year", type=int, default=2026)
     ap.add_argument("--reset-every", type=int, default=50)
     ap.add_argument("--objective", choices=["sharpe", "return"], default="sharpe",
@@ -241,7 +245,7 @@ def main():
     run_search(ticker=a.ticker, start=a.start, end=a.end, iterations=a.iterations,
                n_islands=a.islands, k_parents=a.parents, model=a.model, cost=a.cost,
                n_splits=a.splits, fit_budget=a.fit_budget, champion_budget=a.champion_budget,
-               null_sims=a.null_sims, headroom=a.headroom, holdout_year=a.holdout_year,
+               holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,

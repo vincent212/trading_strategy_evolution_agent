@@ -18,9 +18,7 @@ Pipeline (per candidate):
 
 The signal is always computed on the FULL continuous series (so indicators stay
 causal); the train/test split only selects which dates' returns are scored. Whole
-quarters are kept intact and never shuffled. NOTE: the block-bootstrap helpers
-(build_null_closes, insample_null_scores, null_max_bar_ccv) are a superseded null
-model, retained but no longer called — see PIPELINE.md §11.
+quarters are kept intact and never shuffled.
 """
 from __future__ import annotations
 import numpy as np
@@ -182,18 +180,6 @@ def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0,
                        objective, min_sharpe)
 
 
-# ---- in-sample (no-CV) null-max bar: the per-candidate monkeys gate ----------
-
-def insample_score(strategy_fn, space, data, tools, budget=200, cost=0.0005, seed=0,
-                   objective="sharpe", min_sharpe=0.8) -> float:
-    """Fit params on ALL of `data` and score on that SAME data — the in-sample (no-CV) score."""
-    mask = np.ones(len(data), dtype=bool)
-    p = fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed,
-                    objective, min_sharpe)
-    r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
-    return _score_arr(r[mask], objective, min_sharpe)
-
-
 # ---- selection-aware SHIFT-THE-SIGNAL skill test (the real per-candidate gate) --------------
 
 def sample_configs(space, n_configs=64, seed=0):
@@ -211,8 +197,10 @@ def sample_configs(space, n_configs=64, seed=0):
 
 
 def _score_position(pos, asset_ret, cost, objective, min_sharpe):
-    """Score a raw position array exactly like run_backtest: 1-bar execution lag, cost on turnover."""
-    held = np.empty_like(pos)
+    """Score a raw position array exactly like run_backtest: 1-bar execution lag, cost on turnover.
+    Keep this numerically identical to run_backtest — test_shift_gate.py::test_score_position_matches
+    guards it (the skill test must price trades the same way the fitness/holdout do)."""
+    held = np.empty(len(pos), dtype=float)               # float: never truncate an int input
     held[0] = 0.0
     held[1:] = pos[:-1]                                   # decide t-1, hold t (no lookahead)
     turn = np.abs(np.diff(held, prepend=0.0))
@@ -223,11 +211,21 @@ def _score_position(pos, asset_ret, cost, objective, min_sharpe):
 def make_shift_offsets(n, n_shifts, seed=0, min_gap=250):
     """Random circular shift offsets that EXCLUDE near-identity shifts (within min_gap of 0 or n).
     A shift of a few bars barely moves a slow position, so it is not a genuine null draw and inflates
-    the p-value. Draw from [min_gap, n - min_gap]; min_gap should exceed the longest indicator
-    lookback (~250). Clamped for short series so the range is always valid."""
-    lo = min(int(min_gap), max(1, n // 4))
-    hi = max(lo + 1, n - lo)
-    return np.random.default_rng(seed).integers(lo, hi, size=int(n_shifts))
+    the p-value. Draws from [min_gap, n - min_gap]; min_gap should exceed the longest indicator
+    lookback (~250).
+
+    The exclusion band needs 2*min_gap < n. If the series is too short to honour min_gap (< ~3x it),
+    we keep the widest valid band (n//3 each side) so the offsets stay valid, and WARN — because the
+    near-identity exclusion the p-value relies on is then weaker than advertised."""
+    import warnings
+    gap = int(min_gap)
+    if 2 * gap >= n:                                    # too short to honour the requested gap
+        gap = max(1, n // 3)
+        warnings.warn(f"make_shift_offsets: n={n} too short for min_gap={min_gap}; using {gap}. "
+                      f"Near-identity shift exclusion is weaker than advertised — the skill "
+                      f"p-value may be inflated for slow structures on this ticker.", stacklevel=2)
+    hi = max(gap + 1, n - gap)
+    return np.random.default_rng(seed).integers(gap, hi, size=int(n_shifts))
 
 
 def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offsets=None,
@@ -258,9 +256,12 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
                    .fillna(0.0).clip(-1.0, 1.0).to_numpy())
         except Exception:
             pos = np.zeros(n)
-        pos_list.append(np.ascontiguousarray(pos, dtype=float))
+        pos_list.append(np.asarray(pos, dtype=float))    # .to_numpy() is already C-contiguous float
 
     def maxscore(shift):
+        # np.roll is circular, so a shifted draw has one wrap-seam transition the unshifted `real`
+        # does not — a one-directional cost asymmetry of at most ~2*cost over ~n bars. Verified
+        # immaterial (<0.001 total return over 2000 bars); left as-is rather than special-cased.
         best = float("-inf")
         for pos in pos_list:
             pp = pos if shift == 0 else np.roll(pos, int(shift))
@@ -273,6 +274,12 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
     if shift_offsets is None:
         shift_offsets = make_shift_offsets(n, n_shifts, seed + 1)
     null = np.array([maxscore(k) for k in shift_offsets], dtype=float)
+    if null.size == 0:                                   # no shifts (e.g. n_shifts=0): undefined test
+        return {"pvalue": float("nan"), "real": float(real), "null_mean": float("nan"),
+                "null_sd": float("nan"), "null_q95": float("nan"),
+                "n_configs": len(configs), "n_shifts": 0,
+                "exposure": float(np.mean([np.mean(np.abs(pp)) for pp in pos_list]))
+                if pos_list else float("nan")}
     # (b+1)/(m+1), NOT b/m: the naive fraction can return exactly 0, which is not a valid p-value
     # and is biased low by ~1/m (Phipson & Smyth 2010). The floor is 1/(m+1).
     b, m = int((null >= real).sum()), int(len(null))
@@ -281,78 +288,3 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
     return {"pvalue": pval, "real": float(real), "null_mean": float(null.mean()),
             "null_sd": float(null.std()), "null_q95": float(np.quantile(null, 0.95)),
             "n_configs": len(configs), "n_shifts": int(len(null)), "exposure": exposure}
-
-
-def build_null_closes(returns, index, n_paths=50, block=21, seed=0, base=100.0):
-    """Circular block-bootstrap of `returns` -> n_paths fake 'close' Series.
-
-    Why not sign-flip: flipping signs forces E[return]=0, so the null has NO DRIFT. On a
-    trending asset (NVDA pool ~1.2 Sharpe) that makes the bar trivially beatable by anything
-    net-long — even parameter-free buy & hold clears it. A block bootstrap PRESERVES the drift,
-    the volatility clustering and short-range autocorrelation, while DESTROYING the long-range
-    timing structure a strategy would need real skill to exploit. So the monkeys get the drift
-    too, and only genuine timing skill clears the bar.
-
-    Generated ONCE and reused for every candidate (COMMON RANDOM NUMBERS): the gate threshold is
-    then a consistent comparison across candidates, not noise re-randomised per candidate (which
-    would give two identical structures opposite verdicts)."""
-    r = np.asarray(returns, dtype=float)
-    T = len(r)
-    rng = np.random.default_rng(seed)
-    closes = []
-    for _ in range(int(n_paths)):
-        out = np.empty(T)
-        i = 0
-        while i < T:
-            s = int(rng.integers(0, T))
-            L = min(int(block), T - i)
-            out[i:i + L] = r[(s + np.arange(L)) % T]     # circular block
-            i += L
-        closes.append(pd.Series(base * np.cumprod(1.0 + out), index=index))
-    return closes
-
-
-def insample_null_scores(strategy_fn, space, real_data, tools, null_closes,
-                         budget=200, cost=0.0005, seed=0,
-                         objective="sharpe", min_sharpe=0.8) -> np.ndarray:
-    """In-sample score of ONE structure on each precomputed null close path. Same
-    fit-then-score-on-the-same-data procedure as the real in-sample score, so the overfitting is
-    matched and cancels — a legitimate permutation test. The caller compares the real in-sample
-    score to (mean + c*sd) of these draws (ADDITIVE, sign-safe — a multiplicative bar inverts
-    when the score is negative, which the return-minus-Sharpe-penalty objective is routinely)."""
-    vals = np.empty(len(null_closes))
-    for j, fc in enumerate(null_closes):
-        fdata = real_data.copy()
-        fdata["close"] = fc
-        vals[j] = insample_score(strategy_fn, space, fdata, tools, budget, cost,
-                                 seed + j, objective, min_sharpe)
-    return vals
-
-
-# ---- the null-max bar (capacity gate, on the CCV OOS) -----------------------
-
-def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
-                     cost=0.0005, n_sims=10, seed=0, jobs=1, quantile=0.95,
-                     objective="sharpe", min_sharpe=0.8, block=21) -> dict:
-    """Run the SAME fit+CCV on drift-preserving block-bootstrap nulls, n_sims times, and return
-    the noise ceiling (both a high quantile and mean/sd for an additive verdict).
-
-    Uses the block bootstrap, NOT sign-flip: sign-flip zeroed the drift and made this bar
-    trivially beatable by any net-long strategy on a trending asset (see build_null_closes)."""
-    closes = build_null_closes(data["close"].pct_change().fillna(0.0).to_numpy(),
-                               data.index, n_sims, block, seed)
-    meds = np.empty(n_sims)
-    for s, fc in enumerate(closes):
-        fdata = data.copy()
-        fdata["close"] = fc
-        res = ccv_median_oos(strategy_fn, space, fdata, tools, splits, budget,
-                             cost, jobs, seed=10_000 + s, objective=objective,
-                             min_sharpe=min_sharpe)
-        meds[s] = res["median_oos"]
-    return {
-        "bar": float(np.quantile(meds, quantile)),
-        "mean_noise_median": float(meds.mean()),
-        "std_noise_median": float(meds.std()),
-        "max_noise_median": float(meds.max()),
-        "n_sims": int(n_sims),
-    }
