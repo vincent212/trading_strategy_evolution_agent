@@ -10,8 +10,8 @@ An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fit
 
 - An LLM acts as the **mutation operator**, rewriting strategy structure. It never sees market data and never picks a numeric value.
 - Each candidate declares free parameters; SciPy `differential_evolution` **fits** them on the training quarters of each split.
-- Fitness is the **median out-of-sample** score over random quarter cross-validation splits. Each candidate also gets a **report-only skill p-value** — a selection-aware *shift-the-signal* permutation test (does its timing beat a random re-timing of its own positions?). Selection stays fitness-driven; nothing is hard-gated. The holdout years are sealed and measured once against buy-and-hold.
-- The population evolves across **islands** with periodic resets. The objective is switchable: Sharpe, or return under a Sharpe floor.
+- Fitness is the **median out-of-sample outperformance of buy-and-hold** over random quarter cross-validation splits — scored on the *active return* (strategy minus buy-and-hold), so merely holding the asset scores 0 (default for single stocks; `--no-vs-buyhold` scores raw returns for assets with no long drift). Each candidate also gets a **report-only skill p-value** — a selection-aware *shift-the-signal* permutation test on the same active return (is the outperformance real, or a lucky re-timing of its own positions?). The holdout years are sealed and measured once against buy-and-hold.
+- The objective is switchable: Sharpe, or return under a Sharpe floor. (Note: the "islands" are currently a periodic cull-and-reseed only — the mutation prompt uses the whole population, so they don't isolate sub-populations; see PIPELINE.md §11.)
 - The mutation model is pluggable: a local open model (Ollama), any OpenAI-compatible endpoint, the Anthropic API, or a Claude Code subagent.
 
 The [article](https://vincentmayeski.substack.com/p/why-llms-cant-trade-and-how-to-use) covers the method in full, a worked NVDA example (including where it fails out of sample), and how it relates to FunSearch, AlgoEvolve, and MadEvolve.

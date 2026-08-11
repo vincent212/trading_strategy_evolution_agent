@@ -10,12 +10,13 @@ Read it top to bottom; each section names the file and function that implements 
 An evolutionary loop uses an LLM as a mutation operator to evolve the *structure* of a
 trainable trading strategy for one ticker. Each structure declares free parameters; a numerical
 optimizer fits those parameters. Structures are ranked by their **cross-validated out-of-sample
-median score** (the fitness). A separate, **report-only** statistical test — a selection-aware
-"shift-the-signal" permutation test — is computed for every candidate and headlined on the
-champion; it answers "is the timing real?" and does **not** influence selection. The final
-champion is fitted on all in-sample data and measured **once** on a sealed holdout period, against
-buy-and-hold. Statistical significance (the skill test) and economic significance (beating
-buy-and-hold) are deliberately kept as two separate questions.
+outperformance of buy-and-hold** (the fitness — scored on the *active return*, strategy minus
+buy-and-hold, so merely holding the asset scores 0). A **report-only** statistical test — a
+selection-aware "shift-the-signal" permutation test on the same active return — is computed for
+every candidate and headlined on the champion; it answers "is the outperformance real, or
+monkey-generatable?" The final champion is fitted on all in-sample data and measured **once** on a
+sealed holdout period, against buy-and-hold. A real find must both **beat buy-and-hold** and **clear
+the skill test**; the two are kept as distinct questions (economic vs statistical significance).
 
 ---
 
@@ -54,22 +55,36 @@ net = pos · pct_change(close) − cost · |turnover(pos)|
 `cost` defaults to 0.0005 per unit turnover. The 1-bar lag is the only thing preventing
 look-ahead; every tool in `alpha_tools.py` is causal.
 
-## 4. Fitness = cross-validated median OOS — `backtest.py: ccv_median_oos`
+## 4. Fitness = cross-validated median OOS **outperformance of buy-and-hold** — `backtest.py: ccv_median_oos`
 
-This is the number the search selects on.
+This is the number the search selects on. With `vs_buyhold` on (the default), every score is on the
+**active return** — the strategy's net return **minus buy-and-hold's** (a constant fully-long
+position, `backtest.py: buyhold_returns`) — so the fitness is risk-adjusted **outperformance of
+buy-and-hold**, not raw return.
 
 ```
-splits = 100 quarter-based CV splits of pool          # make_quarter_splits (train 75% / test 25% of quarters)
+bench   = buyhold_returns(pool.close)                 # net return of a constant fully-long position
+splits  = 100 quarter-based CV splits of pool          # make_quarter_splits (train 75% / test 25%)
 for each split (train, test):
-    p   = argmax_p  _score_arr( backtest(structure(pool, p))[train] )   # FIT on train — fit_on_mask
-    s_i = _score_arr( backtest(structure(pool, p))[test] )              # score OOS on test
-fitness = median_i(s_i)                                                 # diag["median_oos"]
+    p   = argmax_p  _score_arr( (backtest(structure(pool,p)) − bench)[train] )   # FIT on active return
+    s_i = _score_arr( (backtest(structure(pool,p)) − bench)[test] )              # score OOS on active
+fitness = median_i(s_i)                                                          # diag["median_oos"]
 ```
 
+- **Why active return.** Raw return rewards mere exposure/drift — being long a trending stock scores
+  well with zero timing skill, so a raw-return search selects overfit long-biased "champions."
+  Scoring `strategy − buy-and-hold` makes **buy-and-hold itself score exactly 0**, so the search is
+  credited only for exposure it timed *better than passively holding*. For a single stock, "be
+  exposed to the asset at the right time" is the skill, and it shows up here as beating buy-and-hold.
+- **Asset-dependent.** `vs_buyhold` is a flag (default on; `--no-vs-buyhold` scores raw). On for
+  single stocks / equity ETFs; off for futures spreads, market-neutral/pairs, mean-reverting or
+  cash-like assets where there is no persistent long drift to hold.
 - `fit_on_mask` fits parameters with SciPy `differential_evolution` (continuous search), budget
   `fit_budget` (default 200 function evals — `maxiter` is derived so total evals ≈ `fit_budget`).
   This is the expensive part: ~100 fits × ~200 backtests each ≈ **2×10⁴** backtests per candidate.
-- Reported alongside: OOS Sharpe, OOS annualized return, fraction of positive splits.
+- Reported alongside: OOS (active) Sharpe = information ratio vs buy-and-hold, OOS excess annualized
+  return, fraction of positive splits. A strategy that merely holds the asset lands at ~0 on all of
+  these; a positive fitness means it beat buy-and-hold on the held-out quarters, risk-adjusted.
 
 ## 5. The evolution loop — `evolve.py: Evolver.run / step`
 
@@ -113,7 +128,11 @@ code, non-`Series` output, non-finite fitness, and duplicates.
 
 The question: *could random re-timing of this structure's own positions, under a fixed uniform
 search over P configs, have produced its in-sample score?* If yes, the apparent edge is not timing
-skill.
+skill. With `vs_buyhold` on, it scores the **same active return** as the fitness (§4), so it asks
+whether the **outperformance of buy-and-hold** is real or monkey-generatable — not whether raw
+exposure is. Buy-and-hold's active return is 0, so it scores 0 and lands at p = 1 (neutral). The two
+requirements are unified: a real find must **beat buy-and-hold** (positive fitness) **and** clear the
+skill test (**not monkey-generatable**).
 
 ```
 configs = sample P configs uniformly from the structure's param space     # sample_configs
@@ -149,11 +168,13 @@ Why this null, and not the earlier ones:
   real score equals every null score → p = 1.0). That is the correct zero point: the test is
   **indifferent** to pure exposure, and measures exposure *management*, blind to exposure *level*.
 
-Calibration (real NVDA pool, verified, with the near-identity fix + `(b+1)/(m+1)`): buy-and-hold
-p = 1.00 (lands on the bar); the four seeds p ≈ **0.04 / 0.47 / 0.40 / 0.24** — seed[0] is
-borderline at 0.04, but that is 1 of 4 tests with no multiplicity correction, so it is weak
-evidence, not a finding; a look-ahead perfect-timing position p = the floor `1/(m+1)` (it maxes out
-the statistic; the estimator never reports 0).
+Calibration (real NVDA pool, verified, with the near-identity fix + `(b+1)/(m+1)`, on **raw**
+returns): buy-and-hold p = 1.00 (lands on the bar); the four seeds p ≈ **0.04 / 0.47 / 0.40 /
+0.24** — seed[0] is borderline at 0.04, but that is 1 of 4 tests with no multiplicity correction, so
+it is weak evidence, not a finding; a look-ahead perfect-timing position p = the floor `1/(m+1)`
+(the estimator never reports 0). With `vs_buyhold` on the test scores the active return, so seed
+values differ, but the invariants hold either way — buy-and-hold p = 1.00 (active return 0),
+perfect timing at the floor.
 
 Cost: cheap — P strategy evaluations + P×(shifts) array scorings (no re-fitting). Runs on every
 candidate. Shift offsets are generated once at run start and reused for every candidate (common
@@ -183,17 +204,25 @@ selection-aware test in-sample and the benchmark out-of-sample.
 
 ## 9. What the NVDA experiments found
 
-Under the corrected skill test, the evolved structures' champion p-values sit well above 0.05, so
-the test **fails to detect** timing skill on NVDA — and on the sealed holdout the champion does not
-beat buy-and-hold. State it as "not detected," **not** "no skill exists": the test's power against
-the *exposure-management* class (cut risk in genuinely worse windows) is low — synthetic checks put
-it around ~16% at a realistic effect size, versus ~100% against directional timing. That is exactly
-the mechanism the champion is described as using (risk control, not return), so a high p-value here
-is consistent with both "no skill" and "real but modest skill this sample cannot resolve." The
-defensible reading: the search finds structures that fit the in-sample data; their timing is not
-shown to beat random re-timing of their own exposure; and buy-and-hold — a strong benchmark for a
-single high-drift name — is not beaten out of sample. (Power figure caveat: it depends on the
-injected effect size; the qualitative gap vs directional timing is robust, the exact 16% is not.)
+The completed NVDA runs so far used the **raw-return** fitness (before the excess-vs-buy-and-hold
+change in §4). Two independent 50-iteration searches produced structures with high CV fitness
+(median OOS Sharpe ~1.3) that **did not generalize**: one collapsed into buy-and-hold out-of-sample
+(its rare short never fired in 2025–2026), the other **lost** to buy-and-hold both holdout years
+(−8.0% vs +38.9% in 2025; +5.2% vs +20.2% in 2026). Champion skill p-values on the corrected test
+were borderline/insignificant (0.050 and 0.070). Blunt reading: raw-return fitness rewards being
+long a trending stock, so it selected overfit long-biased champions with no real edge.
+
+That is exactly why the fitness was changed to **outperformance of buy-and-hold** (§4): under raw
+return, "just hold NVDA" is a great score; under active return it scores 0, and the search is only
+credited for beating it. The expected result on NVDA with the new fitness is that **little or
+nothing reliably beats buy-and-hold out-of-sample** — i.e. ~0 champion fitness — which is the
+correct, honest answer for a single high-drift name, not an overfit "champion." (Pending: a re-run
+under the excess-vs-buy-and-hold fitness to confirm.)
+
+Note on skill-test power: it detects directional timing well but *exposure-management* timing (cut
+risk in genuinely worse windows) only ~16% of the time at a realistic effect size in synthetic
+checks, so a non-significant p means "not detected," not "no skill exists" (exact figure depends on
+the injected effect size; the qualitative gap is robust).
 
 ## 10. Configuration & files
 
@@ -204,16 +233,24 @@ injected effect size; the qualitative gap vs directional timing is robust, the e
 | `params.py` | encode/sample/decode a `param_space()` for the optimizer |
 | `strategy_seed.py` | the `param_space()` + `strategy(data, tools, p)` contract and seed families |
 | `prompt.py` | mutation prompt: whole scored history → one child structure |
-| `backtest.py` | backtest, DE fit, quarter-CV median-OOS fitness, shift-the-signal skill test |
-| `evolve.py` | islands, parent sampling, LLM mutation call, evaluation, report-only skill p-value |
+| `backtest.py` | backtest, DE fit, quarter-CV median-OOS (active) fitness, buy&hold benchmark, shift-the-signal skill test |
+| `evolve.py` | population + islands (reset/reseed only — see §11), LLM mutation call, evaluation, report-only skill p-value |
 | `run.py` | orchestration (`run_search`) + CLI; champion finalization + holdout report |
 | `llm.py` | provider shim: Anthropic, OpenAI-compatible (Ollama/etc.), or Claude Code subagent |
 
 Key CLI flags (`python run.py --help`): `--ticker --holdout-year --objective {sharpe,return}
---min-sharpe --iterations --reset-every --null-gate-configs --null-gate-shifts --no-null-gate`.
+--min-sharpe --no-vs-buyhold --iterations --reset-every --null-gate-configs --null-gate-shifts
+--no-null-gate`. `--no-vs-buyhold` scores raw returns instead of active (excess-over-buy-and-hold);
+keep the default (active) for single stocks, use `--no-vs-buyhold` for assets with no long drift.
 
 ## 11. Known limitations / not yet done
 
+- **Islands are largely vestigial.** `_mutate` builds the prompt from the *whole* combined history
+  (`all_programs()`), not from one island, so the LLM sees everything regardless of island; the
+  per-island softmax parent sampler (`sample_parents`, `k_parents`) is **dead code (never called)**,
+  and there is no two-parent crossover. Effectively there is one global pool for generation; the
+  four "islands" only matter for the periodic `reset_weak_islands` cull-and-reseed. The FunSearch
+  island isolation the class docstring implies is not real — either wire it up or drop it.
 - **Low power against exposure-management skill** (§9): the skill test detects directional timing
   well but risk-control timing only ~16% of the time at a realistic effect size, so a negative
   result means "not detected," not "absent."
