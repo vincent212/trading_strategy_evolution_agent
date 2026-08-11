@@ -2,23 +2,25 @@
 Evaluation engine for TRAINABLE strategies.
 
 Pipeline (per candidate):
-  1. run_backtest / sharpe   — a fitted strategy -> net return stream -> Sharpe.
+  1. run_backtest / sharpe   — a fitted strategy -> net return stream -> score.
                                A 1-bar execution lag is applied here.
   2. make_quarter_splits     — cut the (pre-holdout) history into calendar quarters
                                and draw 100 random 75/25 quarter splits.
   3. fit_on_mask             — on each split's 75% train quarters, tune the strategy's
-                               params with SciPy differential evolution to MAXIMIZE
-                               train Sharpe. (This is 'training' — the LLM doesn't do it.)
+                               params with SciPy differential evolution to MAXIMIZE the
+                               train objective. (This is 'training' — the LLM doesn't do it.)
   4. ccv_median_oos          — score the fitted params on the 25% test quarters -> one
-                               OOS Sharpe per split; take the MEDIAN over the 100 splits.
+                               OOS score per split; take the MEDIAN over the 100 splits.
                                That median is the fitness the evolutionary loop maximizes.
-  5. null_max_bar_ccv        — run the SAME fit+CCV on sign-flipped (pure-noise) returns;
-                               the best median-OOS the search can wring out of noise is
-                               the null-max bar. The real median OOS must clear it.
+  5. shift_null_pvalue       — REPORT-ONLY skill test: selection-aware shift-the-signal
+                               permutation p-value (does the timing beat a random re-timing
+                               of the structure's own positions?). Logged, not a filter.
 
 The signal is always computed on the FULL continuous series (so indicators stay
 causal); the train/test split only selects which dates' returns are scored. Whole
-quarters are kept intact and never shuffled.
+quarters are kept intact and never shuffled. NOTE: the block-bootstrap helpers
+(build_null_closes, insample_null_scores, null_max_bar_ccv) are a superseded null
+model, retained but no longer called — see PIPELINE.md §11.
 """
 from __future__ import annotations
 import numpy as np
@@ -218,6 +220,16 @@ def _score_position(pos, asset_ret, cost, objective, min_sharpe):
     return _score_arr(r, objective, min_sharpe)
 
 
+def make_shift_offsets(n, n_shifts, seed=0, min_gap=250):
+    """Random circular shift offsets that EXCLUDE near-identity shifts (within min_gap of 0 or n).
+    A shift of a few bars barely moves a slow position, so it is not a genuine null draw and inflates
+    the p-value. Draw from [min_gap, n - min_gap]; min_gap should exceed the longest indicator
+    lookback (~250). Clamped for short series so the range is always valid."""
+    lo = min(int(min_gap), max(1, n // 4))
+    hi = max(lo + 1, n - lo)
+    return np.random.default_rng(seed).integers(lo, hi, size=int(n_shifts))
+
+
 def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offsets=None,
                       n_shifts=50, cost=0.0005, seed=0, objective="sharpe", min_sharpe=0.8):
     """Selection-aware SHIFT-THE-SIGNAL skill test (in-sample, per candidate).
@@ -259,8 +271,7 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
 
     real = maxscore(0)
     if shift_offsets is None:
-        rng = np.random.default_rng(seed + 1)
-        shift_offsets = rng.integers(1, max(2, n), size=n_shifts)
+        shift_offsets = make_shift_offsets(n, n_shifts, seed + 1)
     null = np.array([maxscore(k) for k in shift_offsets], dtype=float)
     # (b+1)/(m+1), NOT b/m: the naive fraction can return exactly 0, which is not a valid p-value
     # and is biased low by ~1/m (Phipson & Smyth 2010). The floor is 1/(m+1).

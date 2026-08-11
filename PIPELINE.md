@@ -141,13 +141,19 @@ Why this null, and not the earlier ones:
   **not** fully price in the DE fit that produced the champion, and would under-correct a
   DE-overfit champion. (Diagnostic: compare the test's `real` to the recorded DE fit score; if they
   diverge, P is too small.)
+- **Shift offsets exclude near-identity shifts** (`make_shift_offsets`, drawn from
+  `[min_gap, n − min_gap]`, `min_gap = 250 > longest lookback`). A shift of a few bars barely moves a
+  slow position, so it is not a genuine null draw and inflates p. This matters: excluding them moves
+  seed[0] on the NVDA pool from p = 0.16 to p = **0.04**.
 - **Buy-and-hold lands exactly on the bar** (a constant position is unchanged by a shift, so its
   real score equals every null score → p = 1.0). That is the correct zero point: the test is
   **indifferent** to pure exposure, and measures exposure *management*, blind to exposure *level*.
 
-Calibration (real NVDA pool, verified): buy-and-hold p = 1.00 (lands on the bar), the seeds
-p ≈ 0.16–0.48 (no significant timing skill), a look-ahead perfect-timing position p = the floor
-`1/(m+1)` (it maxes out the statistic; the estimator never reports 0).
+Calibration (real NVDA pool, verified, with the near-identity fix + `(b+1)/(m+1)`): buy-and-hold
+p = 1.00 (lands on the bar); the four seeds p ≈ **0.04 / 0.47 / 0.40 / 0.24** — seed[0] is
+borderline at 0.04, but that is 1 of 4 tests with no multiplicity correction, so it is weak
+evidence, not a finding; a look-ahead perfect-timing position p = the floor `1/(m+1)` (it maxes out
+the statistic; the estimator never reports 0).
 
 Cost: cheap — P strategy evaluations + P×(shifts) array scorings (no re-fitting). Runs on every
 candidate. Shift offsets are generated once at run start and reused for every candidate (common

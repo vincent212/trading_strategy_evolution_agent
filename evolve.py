@@ -154,9 +154,7 @@ class Evolver:
         self._last_is = float("nan")       # its (max-over-configs) real in-sample score
         self._shift_offsets = None
         if null_gate:
-            n = len(self.data)
-            self._shift_offsets = np.random.default_rng(seed).integers(
-                1, max(2, n), size=null_gate_shifts)
+            self._shift_offsets = bt.make_shift_offsets(len(self.data), null_gate_shifts, seed)
         self.jobs = jobs
         self.seed_val = seed
         self.tools = alpha_tools_module()
