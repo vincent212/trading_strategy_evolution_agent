@@ -38,6 +38,8 @@ def run_backtest(signal: pd.Series, close: pd.Series,
     import alpha_tools
     lev = float(alpha_tools.MAX_LEVERAGE)                        # same position cap as clip_signal
     asset_ret = close.pct_change().fillna(0.0)
+    if not isinstance(signal, pd.Series):                       # np.where output: align positionally
+        signal = pd.Series(np.asarray(signal, dtype=float).ravel(), index=close.index)
     pos = signal.reindex(close.index).replace([np.inf, -np.inf], np.nan)
     pos = pos.fillna(0.0).clip(-lev, lev).shift(1).fillna(0.0)   # decide t-1, hold t
     turnover = pos.diff().abs().fillna(0.0)
@@ -278,6 +280,8 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
                 sig = strategy_fn(data, tools, p)
             import alpha_tools
             lev = float(alpha_tools.MAX_LEVERAGE)
+            if not isinstance(sig, pd.Series):                 # np.where output: align positionally
+                sig = pd.Series(np.asarray(sig, dtype=float).ravel(), index=close.index)
             pos = (sig.reindex(close.index).replace([np.inf, -np.inf], np.nan)
                    .fillna(0.0).clip(-lev, lev).to_numpy())
         except Exception:

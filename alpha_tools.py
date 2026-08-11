@@ -138,10 +138,15 @@ def crossover(fast: pd.Series, slow: pd.Series) -> pd.Series:
 MAX_LEVERAGE = 1.0
 
 
-def clip_signal(sig: pd.Series) -> pd.Series:
-    """Clean a raw signal into a valid position in [-MAX_LEVERAGE, MAX_LEVERAGE]."""
+def clip_signal(sig) -> pd.Series:
+    """Clean a raw signal into a valid position in [-MAX_LEVERAGE, MAX_LEVERAGE].
+    Accepts a pandas Series OR a numpy array (e.g. the result of np.where, which drops the index);
+    an array is cleaned here and the backtest re-aligns it positionally to the price index."""
     lev = float(MAX_LEVERAGE)
-    return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-lev, lev)
+    if isinstance(sig, pd.Series):
+        return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-lev, lev)
+    arr = np.nan_to_num(np.asarray(sig, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(arr, -lev, lev)
 
 
 # Names exposed to the LLM in the prompt (see prompt.py).

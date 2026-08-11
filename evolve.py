@@ -181,8 +181,10 @@ class Evolver:
             strat, space = compile_strategy(code)
             space = self._augment_space(code, space)       # declare any p["x"] used but missing
             sig = strat(self.data, self.tools, P.midpoint(space))   # cheap validity check
+            if isinstance(sig, np.ndarray):                # np.where output -> align positionally
+                sig = pd.Series(sig.ravel(), index=self.data.index)
             if not isinstance(sig, pd.Series):
-                raise TypeError("strategy did not return a pandas Series")
+                raise TypeError(f"strategy returned {type(sig).__name__}, expected a Series/array")
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
