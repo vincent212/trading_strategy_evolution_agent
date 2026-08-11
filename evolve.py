@@ -154,6 +154,12 @@ class Evolver:
         self.n_selfcorrected = 0 # rejects rescued by the LLM self-correct retry
         self._last_error = None  # error string of the most recent reject (fed to self-correct)
 
+    def _log_reject(self, reason, code):
+        """Print a rejected candidate and why — so rejects are visible (even ones later self-corrected)."""
+        self.log(f"    REJECT: {reason}")
+        body = "\n".join("      " + ln for ln in code.strip().splitlines())
+        self.log(f"    rejected code:\n{body}")
+
     def evaluate(self, code):
         """Compile, quick-check, then quarter-CCV score. None if invalid.
 
@@ -180,6 +186,7 @@ class Evolver:
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
+            self._log_reject(self._last_error, code)
             self._code_cache[ckey] = None
             return None
         # behavioral duplicate: identical positions at default params == same strategy.
@@ -201,11 +208,13 @@ class Evolver:
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
+            self._log_reject(self._last_error, code)
             self._code_cache[ckey] = None
             return None
         score = diag["median_oos"]
         if not np.isfinite(score):
             self.n_rejected += 1
+            self._log_reject("non-finite fitness (nan/inf)", code)
             self._code_cache[ckey] = None
             return None
         # REPORT-ONLY selection-aware shift-the-signal SKILL p-value (does NOT affect selection).
@@ -357,7 +366,8 @@ class Evolver:
                          f"pop={len(self.db.all_programs())} rej={self.n_rejected} "
                          f"sig={self.n_skill_significant} dup={self.n_dup} "
                          f"fixed={self.n_selfcorrected}")
-                if self._last_code:
+                # rejects already logged their code + reason in evaluate(); print accepted/dup here
+                if self._last_code and child is not None:
                     body = "\n".join("      " + ln for ln in self._last_code.strip().splitlines())
                     self.log(f"    child code (score={cs}{skp}):\n{body}")
         return self.db.best()
