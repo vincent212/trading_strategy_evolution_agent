@@ -273,7 +273,8 @@ class Evolver:
                              cost=self.cost, seed=self.seed_val, objective=self.objective,
                              min_sharpe=self.min_sharpe, benchmark_ret=self._bench)
             sig_full = bt.as_position_series(strat(self.data, self.tools, pf), self.data.index)
-            rr = bt.run_backtest(sig_full, self.data, self.cost).to_numpy()
+            rr = bt.run_backtest(sig_full, self.data, self.cost,
+                                 stop=pf.get("stop_loss", 0.0)).to_numpy()
             diag["maxdd"] = bt._max_drawdown_arr(rr)
             diag["mar"] = bt._mar_arr(rr)
             lev = float(self.max_leverage)                  # clip to the REAL cap, not a magic 9
