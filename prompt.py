@@ -11,6 +11,7 @@ sma(x, n) ema(x, n) roc(x, n) zscore(x, n)          -- trend / momentum
 rsi(x, n=14)                                         -- oscillator, 0..100
 realized_vol(x, n=20) vol_target_scale(x, target_vol, n, max_leverage)
 rolling_high(x, n) rolling_low(x, n) breakout(x, n)  -- breakout / range
+drawdown(x, n)                                       -- % below the rolling n-bar peak (0..-1): drawdown state for timing
 vol_regime(x, n=20, low=-0.5, high=0.5)              -- vol regime by z-score (low/high are z cutoffs): +1 low / -1 high
 pctile_rank(x, n)                                    -- rolling percentile rank, 0..1
 crossover(fast, slow) clip_signal(sig)               -- helpers"""
@@ -108,6 +109,11 @@ of the market costs you the drift, so be out only when it really matters.
 - If LEVERAGE is available (positions may exceed 1.0), concentrate it: lever UP toward the max only \
 in your highest-conviction calm uptrends, and cut hard in stress. Beating buy-and-hold on total \
 RETURN means amplifying the good regimes, not being uniformly levered.
+- A 1% INTRADAY STOP-LOSS is applied AUTOMATICALLY to every day (you exit ~1.1% below the open with \
+slippage; overnight gaps are NOT stopped) — so per-day downside is already capped for you and you do \
+NOT need to code a stop. Focus on WHEN to be exposed and how much to lever. You may still use \
+tools.drawdown(close, n) — how far below the recent peak you are (0 = at a high, -0.2 = 20% below) — \
+to TIME entries/leverage, e.g. lean in as a drawdown recovers, lighten as it deepens.
 Because the score is OUTPERFORMANCE of buy-and-hold, you are paid for the risk you CUT in bad \
 regimes and the extra (or levered) exposure you ADD at good entries — never for merely being long."""
 

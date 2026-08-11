@@ -42,7 +42,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                n_splits=100, fit_budget=200, champion_budget=400,
                holdout_year=2026, reset_every=50, jobs=1, seed=0,
                objective="sharpe", min_sharpe=0.8, vs_buyhold=True, max_leverage=1.0,
-               theme_file=None,
+               stop_loss=None, stop_slippage=0.001, theme_file=None,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                skill_gate=False, skill_pmax=0.10,
                refresh_data=False, out_dir=None, log=print) -> dict:
@@ -87,6 +87,10 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     log(f"max leverage: {max_leverage:g}x"
         + ("  (>1 lets a strategy beat buy-and-hold on RETURN by levering up in good regimes)"
            if max_leverage > 1.0 else "  (fully long/short only — cannot exceed buy-and-hold exposure)"))
+    bt.STOP_LOSS, bt.STOP_SLIP = stop_loss, stop_slippage   # intraday stop applied to strategies
+    log("intraday stop-loss: " + (f"{stop_loss:.1%} from the open, exit at "
+        f"{stop_loss + stop_slippage:.2%} (slippage {stop_slippage:.1%}), no overnight stop"
+        if stop_loss else "OFF (plain close-to-close)"))
     bench = bt.buyhold_returns(pool["close"], cost) if vs_buyhold else None
     import prompt as prompt_mod
     theme = prompt_mod.load_theme(theme_file)
@@ -136,7 +140,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     if len(hold) > 20:
         import pandas as pd
         years = np.asarray(full.index.year)
-        strat_ret = bt.run_backtest(strat(full, tools, p_full), full["close"], cost).to_numpy()
+        strat_ret = bt.run_backtest(strat(full, tools, p_full), full, cost).to_numpy()
         # true always-long benchmark: a constant-1 position independent of the champion's signal.
         # (clip(1,1) on the signal would leave the champion's own NaNs as NaN -> fillna(0) -> cash.)
         bh_ret = bt.run_backtest(pd.Series(1.0, index=full.index), full["close"], cost).to_numpy()
@@ -178,7 +182,8 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                        n_splits=n_splits, fit_budget=fit_budget,
                        cost=cost, holdout_year=holdout_year,
                        objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
-                       max_leverage=max_leverage),
+                       max_leverage=max_leverage, stop_loss=stop_loss,
+                       stop_slippage=stop_slippage),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        skill_rejected=ev.n_skill_rejected,
                        skill_significant=ev.n_skill_significant,
@@ -291,6 +296,10 @@ def main():
                     help="score raw strategy returns instead of active (excess-over-buy-and-hold)")
     ap.add_argument("--max-leverage", type=float, default=1.0,
                     help="position cap (>1 allows leverage — needed to beat buy-and-hold on return)")
+    ap.add_argument("--stop-loss", type=float, default=None,
+                    help="intraday stop as a fraction of the open, e.g. 0.01 = stop out 1%% below open")
+    ap.add_argument("--stop-slippage", type=float, default=0.001,
+                    help="extra loss on a stopped day (0.001 = exit at stop+0.1%%)")
     ap.add_argument("--theme-file", default=None,
                     help="investment-theme paragraph injected into the prompt (default: theme.txt)")
     ap.add_argument("--no-null-gate", dest="null_gate", action="store_false",
@@ -313,7 +322,8 @@ def main():
                holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe, vs_buyhold=a.vs_buyhold,
-               max_leverage=a.max_leverage, theme_file=a.theme_file,
+               max_leverage=a.max_leverage, stop_loss=a.stop_loss, stop_slippage=a.stop_slippage,
+               theme_file=a.theme_file,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
                null_gate_shifts=a.null_gate_shifts,
                skill_gate=a.skill_gate, skill_pmax=a.skill_pmax,

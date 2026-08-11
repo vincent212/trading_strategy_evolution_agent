@@ -83,6 +83,15 @@ def rolling_low(x: pd.Series, n: int) -> pd.Series:
     return x.rolling(int(n), min_periods=int(n)).min().shift(1)
 
 
+def drawdown(x: pd.Series, n: int) -> pd.Series:
+    """How far x is below its rolling n-bar peak, as a value in (-1, 0]: 0 = at a new high,
+    -0.20 = 20% below the recent peak. Causal (the peak includes the current bar, which is known).
+    The natural input for a trailing STOP-LOSS: cut/flatten exposure when drawdown < -threshold,
+    and lean back in as it recovers toward 0."""
+    peak = x.rolling(int(n), min_periods=1).max()
+    return (x / peak - 1.0).fillna(0.0)
+
+
 def breakout(x: pd.Series, n: int) -> pd.Series:
     """+1 on a new n-bar high, -1 on a new n-bar low, 0 otherwise."""
     hi = rolling_high(x, n)
@@ -152,6 +161,6 @@ def clip_signal(sig) -> pd.Series:
 # Names exposed to the LLM in the prompt (see prompt.py).
 TOOL_NAMES = [
     "sma", "ema", "roc", "zscore", "rsi", "realized_vol", "vol_target_scale",
-    "rolling_high", "rolling_low", "breakout", "vol_regime",
+    "rolling_high", "rolling_low", "drawdown", "breakout", "vol_regime",
     "pctile_rank", "crossover", "clip_signal",
 ]

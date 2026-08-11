@@ -20,8 +20,9 @@ def _safe(name: str) -> str:
 def get_data(ticker: str = "SPY", start: str = "2005-01-01", end: str | None = None,
              refresh: bool = False) -> pd.DataFrame:
     """
-    Return a DataFrame indexed by date with a single column:
-        close : `ticker` split/dividend-adjusted close (the asset traded)
+    Return a DataFrame indexed by date with columns:
+        open, high, low, close : `ticker` split/dividend-adjusted OHLC (close is the asset traded;
+        open/high/low drive the intraday stop-loss in the backtest).
 
     Cached to .cache/<ticker>_<start>_<end>.parquet.
     """
@@ -29,7 +30,9 @@ def get_data(ticker: str = "SPY", start: str = "2005-01-01", end: str | None = N
     tag = f"{_safe(ticker)}_{start}_{end or 'latest'}"
     path = os.path.join(CACHE_DIR, f"{tag}.parquet")
     if os.path.exists(path) and not refresh:
-        return pd.read_parquet(path)
+        cached = pd.read_parquet(path)
+        if {"open", "high", "low", "close"}.issubset(cached.columns):
+            return cached                           # re-download stale close-only caches for OHLC
 
     import yfinance as yf  # imported lazily so the module loads without it
 
@@ -44,8 +47,12 @@ def get_data(ticker: str = "SPY", start: str = "2005-01-01", end: str | None = N
             return df[name].iloc[:, 0]
         return df[name]
 
-    df = pd.DataFrame({"close": _col(asset, "Close")})
+    df = pd.DataFrame({"open": _col(asset, "Open"), "high": _col(asset, "High"),
+                       "low": _col(asset, "Low"), "close": _col(asset, "Close")})
     df = df.dropna(subset=["close"]).copy()
+    # any missing OHLC field (rare) falls back to close so the stop just never triggers that day
+    for c in ("open", "high", "low"):
+        df[c] = df[c].fillna(df["close"])
     df.to_parquet(path)
     return df
 

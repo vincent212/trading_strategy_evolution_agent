@@ -29,6 +29,30 @@ import params as P
 
 PERIODS_PER_YEAR = 252
 
+# Intraday stop-loss overlay (set by run_search). STOP_LOSS = 0.01 means: on any day, measured
+# from the OPEN, if the adverse intraday excursion (the day's LOW for a long, HIGH for a short)
+# reaches -STOP_LOSS, the position is stopped out and that day's realised move is capped at
+# -(STOP_LOSS + STOP_SLIP) intraday (slippage). Overnight gaps are NOT stopped (you hold through
+# them). None = no stop (plain close-to-close). Needs open/high/low in the data.
+STOP_LOSS = None
+STOP_SLIP = 0.001
+
+
+def _stopped_returns(data: pd.DataFrame):
+    """Per-day asset PRICE return under the intraday stop, for a LONG and for a SHORT position.
+    Returns (ret_long, ret_short) arrays; run_backtest picks per-bar by the held position's sign."""
+    stop, slip = float(STOP_LOSS), float(STOP_SLIP)
+    o = data["open"].to_numpy(); h = data["high"].to_numpy()
+    lo = data["low"].to_numpy(); c = data["close"].to_numpy()
+    pc = np.empty_like(c); pc[0] = c[0]; pc[1:] = c[:-1]        # prior close
+    gap = o / pc - 1.0                                          # overnight (never stopped)
+    normal = c / pc - 1.0                                       # unstopped close-to-close
+    long_hit = lo <= o * (1.0 - stop)                          # intraday dropped >= stop below open
+    ret_long = np.where(long_hit, (1.0 + gap) * (1.0 - stop - slip) - 1.0, normal)
+    short_hit = h >= o * (1.0 + stop)                          # intraday rose >= stop above open
+    ret_short = np.where(short_hit, (1.0 + gap) * (1.0 + stop + slip) - 1.0, normal)
+    return ret_long, ret_short
+
 
 # ---- core backtest ----------------------------------------------------------
 
@@ -44,14 +68,21 @@ def as_position_series(sig, index) -> pd.Series:
     return pd.Series(np.asarray(sig, dtype=float).ravel(), index=index)
 
 
-def run_backtest(signal: pd.Series, close: pd.Series,
-                 cost_per_turn: float = 0.0005) -> pd.Series:
-    """Fitted signal -> net daily returns, with a 1-bar execution lag and costs."""
+def run_backtest(signal: pd.Series, data, cost_per_turn: float = 0.0005) -> pd.Series:
+    """Fitted signal -> net daily returns, with a 1-bar execution lag and costs. `data` may be the
+    OHLC DataFrame (enables the intraday stop-loss when STOP_LOSS is set) or just the close Series
+    (plain close-to-close; used for the unstopped buy-and-hold benchmark)."""
     import alpha_tools
     lev = float(alpha_tools.MAX_LEVERAGE)                        # same position cap as clip_signal
-    asset_ret = close.pct_change().fillna(0.0)
+    is_df = isinstance(data, pd.DataFrame)
+    close = data["close"] if is_df else data
     pos = as_position_series(signal, close.index).replace([np.inf, -np.inf], np.nan)
     pos = pos.fillna(0.0).clip(-lev, lev).shift(1).fillna(0.0)   # decide t-1, hold t
+    if STOP_LOSS and is_df and {"open", "high", "low"}.issubset(data.columns):
+        rl, rs = _stopped_returns(data)                         # stop the day the position holds
+        asset_ret = pd.Series(np.where(pos.to_numpy() >= 0.0, rl, rs), index=close.index)
+    else:
+        asset_ret = close.pct_change().fillna(0.0)
     turnover = pos.diff().abs().fillna(0.0)
     return pos * asset_ret - cost_per_turn * turnover
 
@@ -178,7 +209,7 @@ def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
     def neg_score(x):
         p = P.decode(x, names, kinds, extra)
         try:
-            r = run_backtest(strategy_fn(data, tools, p), close, cost).to_numpy()
+            r = run_backtest(strategy_fn(data, tools, p), data, cost).to_numpy()
             if benchmark_ret is not None:
                 r = r - benchmark_ret                        # active return vs buy-and-hold
             return -_score_arr(r[mask], objective, min_sharpe)
@@ -207,7 +238,7 @@ def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
         train_mask, test_mask = splits[i]
         p = fit_on_mask(strategy_fn, space, data, tools, train_mask, budget, cost,
                         seed + i, objective, min_sharpe, benchmark_ret=benchmark_ret)
-        r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
+        r = run_backtest(strategy_fn(data, tools, p), data, cost).to_numpy()
         if benchmark_ret is not None:
             r = r - benchmark_ret                            # active return vs buy-and-hold
         rt = r[test_mask]
