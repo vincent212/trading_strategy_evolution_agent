@@ -126,7 +126,7 @@ def _norm_code(code: str) -> str:
 class Evolver:
     def __init__(self, data, splits, client, model=MODEL, n_islands=4, k_parents=2,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
-                 objective="sharpe", min_sharpe=0.8,
+                 objective="sharpe", min_sharpe=0.8, vs_buyhold=True,
                  null_gate=True, null_gate_configs=64, null_gate_shifts=50):
         self.data = data
         self.splits = splits
@@ -137,6 +137,12 @@ class Evolver:
         self.cost = cost
         self.objective = objective
         self.min_sharpe = min_sharpe
+        # vs_buyhold: score the ACTIVE return (strategy − buy-and-hold) everywhere, so the fitness
+        # is risk-adjusted OUTPERFORMANCE of buy-and-hold (a strategy that merely holds scores 0),
+        # and the skill test asks whether that outperformance is real vs a random re-timing of the
+        # same positions. Computed once for the pool; the benchmark return is params-independent.
+        self.vs_buyhold = vs_buyhold
+        self._bench = bt.buyhold_returns(self.data["close"], cost) if vs_buyhold else None
         # per-candidate SELECTION-AWARE SHIFT-THE-SIGNAL skill p-value (REPORT-ONLY — does NOT
         # filter selection). For every candidate we sample null_gate_configs configs of its
         # structure, take the MAX in-sample score over them (the selection the search does), and
@@ -213,7 +219,8 @@ class Evolver:
         try:
             diag = bt.ccv_median_oos(strat, space, self.data, self.tools, self.splits,
                                      self.fit_budget, self.cost, self.jobs, self.seed_val,
-                                     objective=self.objective, min_sharpe=self.min_sharpe)
+                                     objective=self.objective, min_sharpe=self.min_sharpe,
+                                     benchmark_ret=self._bench)
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
@@ -233,7 +240,8 @@ class Evolver:
                                            n_configs=self.null_gate_configs,
                                            shift_offsets=self._shift_offsets,
                                            cost=self.cost, seed=self.seed_val,
-                                           objective=self.objective, min_sharpe=self.min_sharpe)
+                                           objective=self.objective, min_sharpe=self.min_sharpe,
+                                           benchmark_ret=self._bench)
                 diag["skill_pvalue"] = res["pvalue"]
                 self._last_skill_p = res["pvalue"]
                 if res["pvalue"] < 0.05:

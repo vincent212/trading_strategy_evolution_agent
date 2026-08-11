@@ -35,6 +35,22 @@ def test_buy_and_hold_lands_on_the_bar():
     assert r["n_configs"] == 1                                # parameterless -> one config
 
 
+def test_active_return_neutral_to_buy_and_hold():
+    # with vs_buyhold (benchmark_ret), a constant-long position has zero active return:
+    # its outperformance is 0 and its skill p is 1 -- buy&hold can't beat itself and isn't "skill"
+    pool = _pool()
+    bench = bt.buyhold_returns(pool["close"], 5e-4)
+
+    def bh(data, tools, p):
+        return data["close"] * 0 + 1.0
+
+    r = bt.shift_null_pvalue(bh, {}, pool, None, n_configs=4, n_shifts=100,
+                             cost=5e-4, seed=0, objective="sharpe", min_sharpe=0.8,
+                             benchmark_ret=bench)
+    assert abs(r["real"]) < 1e-9                               # active return of buy&hold is 0
+    assert abs(r["pvalue"] - 1.0) < 1e-12
+
+
 def test_score_position_matches_run_backtest():
     # the skill test must price trades identically to the fitness/holdout (run_backtest)
     pool = _pool()

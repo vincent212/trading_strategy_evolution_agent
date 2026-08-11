@@ -110,10 +110,18 @@ def make_quarter_splits(index: pd.DatetimeIndex, n_splits: int = 100,
 
 # ---- fit (training) ---------------------------------------------------------
 
+def buyhold_returns(close, cost: float = 0.0005) -> np.ndarray:
+    """Net-return stream of a constant fully-long position — the buy-and-hold benchmark."""
+    return run_backtest(pd.Series(1.0, index=close.index), close, cost).to_numpy()
+
+
 def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
                 mask: np.ndarray, budget: int = 200, cost: float = 0.0005,
-                seed: int = 0, objective: str = "sharpe", min_sharpe: float = 0.8) -> dict:
+                seed: int = 0, objective: str = "sharpe", min_sharpe: float = 0.8,
+                benchmark_ret=None) -> dict:
     """Tune params to MAXIMIZE the objective over the `mask` dates via differential evolution.
+    If benchmark_ret is given, the strategy is scored on its ACTIVE return (strategy − benchmark),
+    so the fit optimizes risk-adjusted OUTPERFORMANCE of the benchmark, not raw exposure.
     Returns the fitted params dict (empty if the strategy declares no parameters)."""
     names, bounds, kinds, extra = P.parse_space(space)
     close = data["close"]
@@ -124,6 +132,8 @@ def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
         p = P.decode(x, names, kinds, extra)
         try:
             r = run_backtest(strategy_fn(data, tools, p), close, cost).to_numpy()
+            if benchmark_ret is not None:
+                r = r - benchmark_ret                        # active return vs buy-and-hold
             return -_score_arr(r[mask], objective, min_sharpe)
         except Exception:
             return 10.0
@@ -139,15 +149,20 @@ def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
 # ---- cross-validated OOS (the fitness) -------------------------------------
 
 def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
-                   cost=0.0005, jobs=1, seed=0, objective="sharpe", min_sharpe=0.8) -> dict:
+                   cost=0.0005, jobs=1, seed=0, objective="sharpe", min_sharpe=0.8,
+                   benchmark_ret=None) -> dict:
     """Fit on each split's train quarters, score OOS on its test quarters. `median_oos` is the
     median per-split OOS OBJECTIVE score (the fitness the evolutionary loop maximizes); the
-    OOS Sharpe and OOS annual return are always reported alongside it."""
+    OOS Sharpe and OOS annual return are always reported alongside it. If benchmark_ret is given,
+    every score is on the ACTIVE return (strategy − benchmark), so the fitness is risk-adjusted
+    OUTPERFORMANCE of buy-and-hold — a strategy that merely holds the asset scores 0, not positive."""
     def one(i):
         train_mask, test_mask = splits[i]
         p = fit_on_mask(strategy_fn, space, data, tools, train_mask, budget, cost,
-                        seed + i, objective, min_sharpe)
+                        seed + i, objective, min_sharpe, benchmark_ret=benchmark_ret)
         r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
+        if benchmark_ret is not None:
+            r = r - benchmark_ret                            # active return vs buy-and-hold
         rt = r[test_mask]
         return (_score_arr(rt, objective, min_sharpe), _sharpe_arr(rt), _ann_return_arr(rt))
 
@@ -173,11 +188,11 @@ def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
 
 
 def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0,
-             objective="sharpe", min_sharpe=0.8) -> dict:
+             objective="sharpe", min_sharpe=0.8, benchmark_ret=None) -> dict:
     """Fit params on ALL of `data` (used for the champion before the final holdout)."""
     mask = np.ones(len(data), dtype=bool)
     return fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed,
-                       objective, min_sharpe)
+                       objective, min_sharpe, benchmark_ret=benchmark_ret)
 
 
 # ---- selection-aware SHIFT-THE-SIGNAL skill test (the real per-candidate gate) --------------
@@ -196,15 +211,19 @@ def sample_configs(space, n_configs=64, seed=0):
     return out
 
 
-def _score_position(pos, asset_ret, cost, objective, min_sharpe):
+def _score_position(pos, asset_ret, cost, objective, min_sharpe, benchmark_ret=None):
     """Score a raw position array exactly like run_backtest: 1-bar execution lag, cost on turnover.
     Keep this numerically identical to run_backtest — test_shift_gate.py::test_score_position_matches
-    guards it (the skill test must price trades the same way the fitness/holdout do)."""
+    guards it (the skill test must price trades the same way the fitness/holdout do). If benchmark_ret
+    is given, score the ACTIVE return (position − benchmark) so the skill test matches the excess-vs-
+    buy-and-hold fitness (buy-and-hold then scores 0 and the shift test is neutral to it)."""
     held = np.empty(len(pos), dtype=float)               # float: never truncate an int input
     held[0] = 0.0
     held[1:] = pos[:-1]                                   # decide t-1, hold t (no lookahead)
     turn = np.abs(np.diff(held, prepend=0.0))
     r = held * asset_ret - cost * turn
+    if benchmark_ret is not None:
+        r = r - benchmark_ret
     return _score_arr(r, objective, min_sharpe)
 
 
@@ -229,14 +248,17 @@ def make_shift_offsets(n, n_shifts, seed=0, min_gap=250):
 
 
 def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offsets=None,
-                      n_shifts=50, cost=0.0005, seed=0, objective="sharpe", min_sharpe=0.8):
-    """Selection-aware SHIFT-THE-SIGNAL skill test (in-sample, per candidate).
+                      n_shifts=50, cost=0.0005, seed=0, objective="sharpe", min_sharpe=0.8,
+                      benchmark_ret=None):
+    """Selection-aware SHIFT-THE-SIGNAL skill test (in-sample, per candidate). Guards against luck:
+    is the score reproducible by a random re-timing of the structure's own positions? When
+    benchmark_ret is given it scores the ACTIVE return (strategy − benchmark), matching the
+    excess-vs-buy-and-hold fitness — so it asks whether the OUTPERFORMANCE of buy-and-hold is real
+    or monkey-generatable, not whether raw exposure is.
 
     The null keeps the asset returns and each config's exposure profile EXACTLY, and destroys ONLY
-    the alignment between signal and return by circularly shifting the position series. So the drift
-    and the exposure level cancel — the test isolates timing skill (exposure MANAGEMENT), the one
-    thing fitting can fake. Buy & hold (a constant position, unchanged by a shift) lands exactly on
-    the bar by construction, which is the correct zero point.
+    the alignment between signal and return by circularly shifting the position series. Buy & hold
+    (a constant position, unchanged by a shift) lands exactly on the bar by construction.
 
     Selection-aware: `real` and every null draw take the MAX over the SAME n_configs sampled configs,
     so the 'I tried many settings and kept the best' inflation appears on both sides and cancels.
@@ -265,7 +287,7 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
         best = float("-inf")
         for pos in pos_list:
             pp = pos if shift == 0 else np.roll(pos, int(shift))
-            s = _score_position(pp, asset_ret, cost, objective, min_sharpe)
+            s = _score_position(pp, asset_ret, cost, objective, min_sharpe, benchmark_ret)
             if s > best:
                 best = s
         return best

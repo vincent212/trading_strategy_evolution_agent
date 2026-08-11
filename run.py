@@ -40,7 +40,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                n_islands=4, k_parents=3, model="claude-haiku-4-5", cost=0.0005,
                n_splits=100, fit_budget=200, champion_budget=400,
                holdout_year=2026, reset_every=50, jobs=1, seed=0,
-               objective="sharpe", min_sharpe=0.8,
+               objective="sharpe", min_sharpe=0.8, vs_buyhold=True,
                null_gate=True, null_gate_configs=64, null_gate_shifts=50,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
@@ -67,14 +67,17 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
 
     splits = bt.make_quarter_splits(pool.index, n_splits=n_splits, train_frac=0.75, seed=seed)
 
-    log(f"objective: {objective}" + (f" (min Sharpe {min_sharpe})" if objective == "return" else ""))
+    log(f"objective: {objective}" + (f" (min Sharpe {min_sharpe})" if objective == "return" else "")
+        + (f"  |  fitness = risk-adjusted OUTPERFORMANCE of buy-and-hold (active return)"
+           if vs_buyhold else "  |  fitness = raw strategy return"))
     log(f"shift-the-signal skill p-value (report-only): " + ("ON" if null_gate else "OFF")
         + (f" (selection-aware, {null_gate_configs} configs x {null_gate_shifts} random shifts, "
-           f"common random numbers; selection stays fitness-driven)" if null_gate else ""))
+           f"scored on the SAME active return; buy-and-hold -> 0)" if null_gate else ""))
+    bench = bt.buyhold_returns(pool["close"], cost) if vs_buyhold else None
     ev = evolve_mod.Evolver(pool, splits, client, model=model, n_islands=n_islands,
                             k_parents=k_parents, fit_budget=fit_budget, cost=cost,
                             jobs=jobs, seed=seed, log=log,
-                            objective=objective, min_sharpe=min_sharpe,
+                            objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold,
                             null_gate=null_gate, null_gate_configs=null_gate_configs,
                             null_gate_shifts=null_gate_shifts)
     ev.seed(SEEDS)                              # four different families, one per island
@@ -99,14 +102,15 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                                                n_configs=max(256, null_gate_configs * 4),
                                                n_shifts=max(300, null_gate_shifts * 4),
                                                cost=cost, seed=seed,
-                                               objective=objective, min_sharpe=min_sharpe)
+                                               objective=objective, min_sharpe=min_sharpe,
+                                               benchmark_ret=bench)
             champ_skill_p = float(champ_skill["pvalue"])
         except Exception as e:
             log(f"champion skill p-value failed ({type(e).__name__}: {e}); reporting n/a")
 
     # final: fit champion on all pool, measure once on the held-out year
     p_full = bt.fit_full(strat, space, pool, tools, budget=champion_budget, cost=cost, seed=seed,
-                         objective=objective, min_sharpe=min_sharpe)
+                         objective=objective, min_sharpe=min_sharpe, benchmark_ret=bench)
     hold_sharpe = hold_return = None
     hold_by_year = {}                                   # per held-out year: strategy vs buy&hold
     if len(hold) > 20:
@@ -136,7 +140,7 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                        model=getattr(client, "model", model), backend=client.backend,
                        n_islands=n_islands, n_splits=n_splits, fit_budget=fit_budget,
                        cost=cost, holdout_year=holdout_year,
-                       objective=objective, min_sharpe=min_sharpe),
+                       objective=objective, min_sharpe=min_sharpe, vs_buyhold=vs_buyhold),
         "search": dict(evaluated=ev.n_evaluated, rejected=ev.n_rejected,
                        skill_significant=ev.n_skill_significant,
                        population=len(ev.db.all_programs())),
@@ -186,10 +190,13 @@ def _print_report(r, log):
     log(f"fitted params (full pool) : {c['fitted_params_full']}")
     log(f"objective                 : {obj}"
         + (f" (min Sharpe {r['config'].get('min_sharpe')})" if obj == "return" else ""))
-    log(f"fitness (CV median OOS)   : {c['fitness_median_oos']:.3f}  "
-        f"(positive splits {c['frac_positive_splits']:.0%})")
-    log(f"CV median OOS Sharpe      : {c['median_oos_sharpe']:.3f}")
-    log(f"CV median OOS ann.return  : {c['median_oos_annual_return']:+.1%}")
+    vsb = r["config"].get("vs_buyhold", False)
+    unit = "excess vs buy&hold" if vsb else "raw"
+    log(f"fitness (CV median OOS)   : {c['fitness_median_oos']:.3f}  ({unit}; "
+        f"positive splits {c['frac_positive_splits']:.0%})")
+    log(f"CV median OOS {'active ' if vsb else ''}Sharpe : {c['median_oos_sharpe']:.3f}"
+        + ("   (>0 => beat buy&hold risk-adjusted, in-sample)" if vsb else ""))
+    log(f"CV median OOS {'excess ' if vsb else ''}ann.ret: {c['median_oos_annual_return']:+.1%}")
     hs, hr = c["holdout_year_sharpe"], c["holdout_year_return"]
     log(f"holdout {r['config']['holdout_year']} Sharpe      : "
         + ("n/a" if hs is None else f"{hs:.3f}")
@@ -232,6 +239,8 @@ def main():
                     help="maximize Sharpe (default) or annual return subject to a Sharpe floor")
     ap.add_argument("--min-sharpe", type=float, default=0.8,
                     help="Sharpe floor when --objective return (soft-penalized below it)")
+    ap.add_argument("--no-vs-buyhold", dest="vs_buyhold", action="store_false",
+                    help="score raw strategy returns instead of active (excess-over-buy-and-hold)")
     ap.add_argument("--no-null-gate", dest="null_gate", action="store_false",
                     help="disable the per-candidate shift-the-signal skill p-value (report-only)")
     ap.add_argument("--null-gate-configs", type=int, default=64,
@@ -247,7 +256,7 @@ def main():
                n_splits=a.splits, fit_budget=a.fit_budget, champion_budget=a.champion_budget,
                holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
-               objective=a.objective, min_sharpe=a.min_sharpe,
+               objective=a.objective, min_sharpe=a.min_sharpe, vs_buyhold=a.vs_buyhold,
                null_gate=a.null_gate, null_gate_configs=a.null_gate_configs,
                null_gate_shifts=a.null_gate_shifts,
                refresh_data=a.refresh_data)
