@@ -11,7 +11,7 @@ An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fit
 - An LLM acts as the **mutation operator**, rewriting strategy structure. It never sees market data and never picks a numeric value.
 - Each candidate declares free parameters; SciPy `differential_evolution` **fits** them on the training quarters of each split.
 - Fitness is the **median out-of-sample outperformance of buy-and-hold** over random quarter cross-validation splits — scored on the *active return* (strategy minus buy-and-hold), so merely holding the asset scores 0 (default for single stocks; `--no-vs-buyhold` scores raw returns for assets with no long drift). Each candidate also gets a **report-only skill p-value** — a selection-aware *shift-the-signal* permutation test on the same active return (is the outperformance real, or a lucky re-timing of its own positions?). The holdout years are sealed and measured once against buy-and-hold.
-- The objective is switchable: Sharpe, or return under a Sharpe floor. (Note: the "islands" are currently a periodic cull-and-reseed only — the mutation prompt uses the whole population, so they don't isolate sub-populations; see PIPELINE.md §11.)
+- The objective is switchable: Sharpe, or return under a Sharpe floor; and with leverage enabled, strategies can lever up to beat buy-and-hold on return. A single population with a periodic cull replaces the old islands (the mutation prompt uses the whole scored history; see PIPELINE.md §11).
 - The mutation model is pluggable: a local open model (Ollama), any OpenAI-compatible endpoint, the Anthropic API, or a Claude Code subagent.
 
 The [article](https://vincentmayeski.substack.com/p/why-llms-cant-trade-and-how-to-use) covers the method in full, a worked NVDA example (including where it fails out of sample), and how it relates to FunSearch, AlgoEvolve, and MadEvolve.
@@ -45,7 +45,7 @@ Progress streams to `runs/<TICKER>_progress.log`. The champion code, its median 
 | `strategy_seed.py` | the trainable `param_space()` + `strategy(data, tools, p)` contract and seeds |
 | `prompt.py` | the mutation prompt (whole scored history → one child) |
 | `backtest.py` | backtest, differential-evolution fit, quarter-CV median-OOS fitness, shift-the-signal skill test |
-| `evolve.py` | islands, sampling, mutation call, evaluation, repair/self-correct |
+| `evolve.py` | single population + periodic cull, mutation call, evaluation, skill p-value/gate, repair/self-correct |
 | `run.py` | orchestration: `run_search(...)` and CLI |
 | `llm.py` | provider shim: Ollama / OpenAI-compatible / Anthropic / Claude Code subagent |
 | `data.py` | Yahoo Finance price data (any ticker), cached to disk |

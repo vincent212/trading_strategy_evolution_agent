@@ -25,7 +25,7 @@ run, watch it, and interpret the result honestly.
 - `backtest.py` — 1-bar-lagged, cost-aware backtest; quarter-CV median-OOS **fitness**; and a
   **report-only** selection-aware *shift-the-signal* skill p-value (does the timing beat a random
   re-timing of the strategy's own positions?). Nothing is hard-gated — selection is by fitness.
-- `evolve.py` — islands, parent sampling, mutation call, evaluation.
+- `evolve.py` — single population + periodic cull, mutation call, evaluation, skill p-value / gate.
 - `run.py` — `run_search(...)` / CLI; splits train/holdout, runs the loop, selects the champion by
   fitness, computes its skill p-value, measures it once on the sealed holdout vs buy-and-hold,
   writes `runs/run_*.json`.
@@ -55,7 +55,8 @@ run, watch it, and interpret the result honestly.
 - Do not edit `backtest.py`'s execution lag, the skill test, or the causal shifts to make a
   strategy look better. If asked to loosen rigor, flag the risk first.
 - Do not fabricate metrics. Every number you report must come from a run's JSON output.
-- Tuning knobs you may adjust on request: iterations, islands, parents, model, cost, splits,
-  objective/min-sharpe, null-gate-configs, null-gate-shifts, date range, holdout year. New alpha
+- Tuning knobs you may adjust on request: iterations, model, cost, splits, objective/min-sharpe,
+  max-leverage, vs-buyhold, skill-gate/skill-pmax, null-gate-configs/shifts, reset-every,
+  date range, holdout year, jobs. New alpha
   tools go in `alpha_tools.py` (keep them causal) and must be added to `TOOL_NAMES` and
   `prompt.py`'s tool list.

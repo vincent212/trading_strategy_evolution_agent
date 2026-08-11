@@ -110,7 +110,12 @@ class Evolver:
         self.client = client
         self.model = model
         self.theme = theme          # investment-theme paragraph injected into the system prompt
+        # Position cap. clip_signal / run_backtest enforce it via the alpha_tools.MAX_LEVERAGE
+        # module global, so set it HERE from this one arg — otherwise the prompt (which reads
+        # self.max_leverage) and the backtest (which reads the global) could disagree. Single-run
+        # assumption: not safe for two Evolvers with different leverage in one process.
         self.max_leverage = max_leverage
+        alpha_tools_module().MAX_LEVERAGE = float(max_leverage)
         self.fit_budget = fit_budget
         self.cost = cost
         self.objective = objective
@@ -121,15 +126,15 @@ class Evolver:
         # same positions. Computed once for the pool; the benchmark return is params-independent.
         self.vs_buyhold = vs_buyhold
         self._bench = bt.buyhold_returns(self.data["close"], cost) if vs_buyhold else None
-        # per-candidate SELECTION-AWARE SHIFT-THE-SIGNAL skill p-value (REPORT-ONLY — does NOT
-        # filter selection). For every candidate we sample null_gate_configs configs of its
-        # structure, take the MAX in-sample score over them (the selection the search does), and
-        # compare it to that same max under a fixed set of random circular SHIFTS of the positions.
-        # Shifting keeps returns and each config's exposure profile exactly and destroys only the
-        # signal<->return alignment, so drift and exposure level cancel and only timing skill is
-        # tested. p = fraction of shifted maxima >= the real max. Selection is still by CV
-        # median-OOS fitness; this p-value is logged and headlined only. Shift offsets are fixed
-        # once (common random numbers) so the bar is a consistent comparison across candidates.
+        # per-candidate SELECTION-AWARE SHIFT-THE-SIGNAL skill p-value. Report-only by DEFAULT (does
+        # not filter selection) — but with skill_gate on it becomes a hard reject (see evaluate()).
+        # For every candidate we sample null_gate_configs configs of its structure, take the MAX
+        # in-sample score over them (the selection the search does), and compare it to that same max
+        # under a fixed set of random circular SHIFTS of the positions. Shifting keeps returns and
+        # each config's exposure profile exactly and destroys only the signal<->return alignment, so
+        # drift and exposure level cancel and only timing skill is tested. p = fraction of shifted
+        # maxima >= the real max. Shift offsets are fixed once (common random numbers) so the bar is
+        # a consistent comparison across candidates.
         self.null_gate = null_gate
         self.null_gate_configs = null_gate_configs
         self.null_gate_shifts = null_gate_shifts
@@ -188,11 +193,8 @@ class Evolver:
         try:
             strat, space = compile_strategy(code)
             space = self._augment_space(code, space)       # declare any p["x"] used but missing
-            sig = strat(self.data, self.tools, P.midpoint(space))   # cheap validity check
-            if isinstance(sig, np.ndarray):                # np.where output -> align positionally
-                sig = pd.Series(sig.ravel(), index=self.data.index)
-            if not isinstance(sig, pd.Series):
-                raise TypeError(f"strategy returned {type(sig).__name__}, expected a Series/array")
+            sig = bt.as_position_series(strat(self.data, self.tools, P.midpoint(space)),
+                                        self.data.index)    # coerce Series/np.where-array; else raises
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
@@ -264,15 +266,14 @@ class Evolver:
             pf = bt.fit_full(strat, space, self.data, self.tools, budget=self.fit_budget,
                              cost=self.cost, seed=self.seed_val, objective=self.objective,
                              min_sharpe=self.min_sharpe, benchmark_ret=self._bench)
-            rr = bt.run_backtest(strat(self.data, self.tools, pf),
-                                 self.data["close"], self.cost).to_numpy()
+            sig_full = bt.as_position_series(strat(self.data, self.tools, pf), self.data.index)
+            rr = bt.run_backtest(sig_full, self.data["close"], self.cost).to_numpy()
             diag["maxdd"] = bt._max_drawdown_arr(rr)
             diag["mar"] = bt._mar_arr(rr)
-            posv = strat(self.data, self.tools, pf)
-            posv = posv.to_numpy() if hasattr(posv, "to_numpy") else np.asarray(posv, float).ravel()
-            diag["avg_exposure"] = float(np.nanmean(np.clip(posv, -9.0, 9.0)))
-        except Exception:
-            pass
+            lev = float(self.max_leverage)                  # clip to the REAL cap, not a magic 9
+            diag["avg_exposure"] = float(np.nanmean(sig_full.clip(-lev, lev).to_numpy()))
+        except Exception as e:                              # advisory metrics — log, don't crash
+            self.log(f"    risk profile failed ({type(e).__name__}: {e})")
         self.n_evaluated += 1
         prog = Program(code, float(score), diag, space)
         self._code_cache[ckey] = prog

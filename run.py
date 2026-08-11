@@ -1,7 +1,8 @@
 """
 Orchestration. Searches for a strategy on a ticker using pre-holdout data (selection by CV
-median-OOS fitness), annotates the champion with a report-only shift-the-signal skill p-value,
-and measures it once on the sealed holdout years against buy-and-hold. Nothing is hard-gated.
+median-OOS fitness), scores a shift-the-signal skill p-value per candidate, and measures the
+champion once on the sealed holdout years against buy-and-hold. The skill p-value is report-only
+by default; with --skill-gate it becomes a hard gate that REJECTS mutations with no timing skill.
 
 Usable as a CLI (`python run.py --ticker NVDA`) or a call (`from run import run_search`).
 """
@@ -46,6 +47,10 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                skill_gate=False, skill_pmax=0.10,
                refresh_data=False, out_dir=None, log=print) -> dict:
     np.random.seed(seed)
+    if skill_gate and (not null_gate or null_gate_shifts < 1):
+        raise ValueError("--skill-gate needs the skill test running with >=1 shift "
+                         "(keep the skill test on and --null-gate-shifts >= 1); otherwise the "
+                         "p-value is NaN and the gate would silently accept everything.")
     out_dir = out_dir or os.path.join(os.path.dirname(__file__), "runs")
     os.makedirs(out_dir, exist_ok=True)
     if log is print:                            # default -> proper flushed logging
@@ -160,8 +165,9 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
             "strategy_maxdd": bt._max_drawdown_arr(sp), "strategy_mar": bt._mar_arr(sp),
             "buyhold_sharpe": bt._sharpe_arr(bp), "buyhold_cagr": bt._cagr_arr(bp),
             "buyhold_maxdd": bt._max_drawdown_arr(bp), "buyhold_mar": bt._mar_arr(bp),
-            "avg_exposure": float(np.nanmean(np.clip(
-                strat(full, tools, p_full).reindex(full.index).to_numpy()[pm], -9, 9))),
+            "avg_exposure": float(np.nanmean(bt.as_position_series(
+                strat(full, tools, p_full), full.index).clip(-max_leverage, max_leverage)
+                .to_numpy()[pm])),
         }
         hold_by_year["_insample"] = insample_risk
 
