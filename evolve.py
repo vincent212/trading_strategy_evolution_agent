@@ -161,16 +161,20 @@ class Evolver:
         self._sig_cache = {}     # default-param positions -> Program (behavioral dedup)
         self._last_cached = False
         self._last_code = ""     # raw code of the most recent child (for logging)
+        self._recent_rejects = []  # last few (reason, code) rejects, shown to the model as negatives
         self._n_steps = 0        # mutation counter (drives the periodic exploration turn)
         self._last_explore = False
         self.n_selfcorrected = 0 # rejects rescued by the LLM self-correct retry
         self._last_error = None  # error string of the most recent reject (fed to self-correct)
 
     def _log_reject(self, reason, code):
-        """Print a rejected candidate and why — so rejects are visible (even ones later self-corrected)."""
+        """Print a rejected candidate and why, AND remember it as a negative example for the prompt
+        (so the model learns what a bad strategy looks like instead of re-proposing it)."""
         self.log(f"    REJECT: {reason}")
         body = "\n".join("      " + ln for ln in code.strip().splitlines())
         self.log(f"    rejected code:\n{body}")
+        self._recent_rejects.append({"reason": reason, "code": code})
+        self._recent_rejects = self._recent_rejects[-8:]   # keep the most recent handful
 
     def evaluate(self, code, gate=True):
         """Compile, quick-check, then quarter-CCV score. None if invalid. gate=True applies the
@@ -254,9 +258,11 @@ class Evolver:
                     and diag["skill_pvalue"] >= self.skill_pmax):
                 self.n_skill_rejected += 1
                 self._last_skill_rejected = True
-                self._log_reject(f"NO TIMING SKILL (skill_p={diag['skill_pvalue']:.2f} >= "
-                                 f"{self.skill_pmax:g}) — its outperformance of buy&hold is "
-                                 f"leverage/luck, not skill", code)
+                self._log_reject(f"scored {score:+.3f} (beat buy&hold) but NO TIMING SKILL "
+                                 f"(skill_p={diag['skill_pvalue']:.2f} >= {self.skill_pmax:g}): a "
+                                 f"random re-timing of its own positions does just as well, so the "
+                                 f"outperformance is leverage/luck, not skill — this exposure/tilt "
+                                 f"pattern is NOT specific to the price path", code)
                 self._code_cache[ckey] = None           # not a code error: no self-correct
                 return None
         # RISK PROFILE for the PROMPT (survivors only) — so the model optimizes with drawdown /
@@ -352,7 +358,7 @@ class Evolver:
         # Show the WHOLE history (every distinct strategy tried + its score), not just two
         # parents, so the model can see which structures win and avoid repeating them.
         history = [p.as_parent() for p in self.db.all_programs()]
-        user = prompt_mod.build_user_prompt(history, explore=explore)
+        user = prompt_mod.build_user_prompt(history, explore=explore, rejects=self._recent_rejects)
         # The client (Anthropic or OpenAI-compatible) handles provider specifics,
         # including dropping temperature on models that reject it.
         text = self.client.mutate(prompt_mod.system_prompt(self.theme, self.max_leverage),

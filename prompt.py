@@ -149,11 +149,11 @@ def _norm(code: str) -> str:
     return "\n".join(ln.rstrip() for ln in code.strip().splitlines() if ln.strip())
 
 
-def build_user_prompt(history: list[dict], explore: bool = False) -> str:
-    """history: EVERY strategy tried so far, each {code, score, diagnostics}. We show the whole
-    landscape (best first, deduplicated) with each one's outperformance-of-buy-and-hold score, so
-    the model can see which STRUCTURES beat holding and which did not — and avoid re-proposing ones
-    already tried.
+def build_user_prompt(history: list[dict], explore: bool = False, rejects=None) -> str:
+    """history: EVERY surviving strategy, each {code, score, diagnostics}, best first. rejects: the
+    last few THROWN-OUT candidates, each {reason, code} — shown as negative examples so the model
+    learns what fails (invalid code, or beat buy-and-hold but no real timing skill) instead of
+    re-proposing it and getting stuck.
 
     explore=True turns this into an EXPLORATION turn: ignore the scores, take a random jump to a
     structure unlike anything tried (to escape local optima)."""
@@ -187,6 +187,13 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
         parts.append(f"# (+{len(rows) - MAX} more tried, scoring in between — not shown)")
     best = rows[0].get("score", float("nan")) if rows else float("nan")
     joined = "\n\n".join(parts)
+    if rejects:
+        rparts = ["REJECTED — these were tried and THROWN OUT for the stated reason; they are NOT in "
+                  "the history above and CANNOT be used. Study them to learn what a BAD strategy "
+                  "looks like, and do NOT propose these or minor variants of them:"]
+        for r in rejects[-6:]:
+            rparts.append(f"# REJECTED: {r.get('reason', '').strip()}\n{r.get('code', '').strip()}")
+        joined = joined + "\n\n" + "\n\n".join(rparts)
     if explore:
         return (f"{joined}\n\n"
                 f"EXPLORATION TURN — ignore the scores above. Take a RANDOM JUMP: propose a "
