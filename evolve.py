@@ -219,6 +219,22 @@ class Evolver:
             self._log_reject("non-finite fitness (nan/inf)", code)
             self._code_cache[ckey] = None
             return None
+        # RISK PROFILE for the PROMPT — so the model optimizes with drawdown/leverage IN VIEW, not
+        # blind to it. Fit once on the full pool, backtest, record max drawdown, MAR and avg exposure.
+        diag["maxdd"] = diag["mar"] = diag["avg_exposure"] = float("nan")
+        try:
+            pf = bt.fit_full(strat, space, self.data, self.tools, budget=self.fit_budget,
+                             cost=self.cost, seed=self.seed_val, objective=self.objective,
+                             min_sharpe=self.min_sharpe, benchmark_ret=self._bench)
+            rr = bt.run_backtest(strat(self.data, self.tools, pf),
+                                 self.data["close"], self.cost).to_numpy()
+            diag["maxdd"] = bt._max_drawdown_arr(rr)
+            diag["mar"] = bt._mar_arr(rr)
+            posv = strat(self.data, self.tools, pf)
+            posv = posv.to_numpy() if hasattr(posv, "to_numpy") else np.asarray(posv, float).ravel()
+            diag["avg_exposure"] = float(np.nanmean(np.clip(posv, -9.0, 9.0)))
+        except Exception:
+            pass
         # REPORT-ONLY selection-aware shift-the-signal SKILL p-value (does NOT affect selection).
         # Attached to diagnostics and logged; the champion gets a higher-resolution version at the end.
         diag["skill_pvalue"] = float("nan")

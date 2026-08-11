@@ -166,14 +166,23 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
         rows.append(p)
     MAX = 24                                       # bound context: top 16 + worst 8
     shown = rows if len(rows) <= MAX else rows[:16] + rows[-8:]
-    parts = ["HISTORY — every distinct strategy tried so far and its OUTPERFORMANCE of buy-and-hold "
-             "(median_oos = active-return score; 0 = no better than just holding the stock, higher "
-             "is better), best first. Learn which STRUCTURES actually beat buy-and-hold:"]
+    parts = ["HISTORY — every distinct strategy tried so far, best first. `score` is OUTPERFORMANCE "
+             "of buy-and-hold (0 = no better than just holding; higher is better) — that is what you "
+             "maximize. The other numbers show the RISK behind the score so you don't chase return "
+             "with reckless leverage: Sharpe = risk-adjusted excess (info ratio), MAR = return per "
+             "unit of worst drawdown (HIGHER is safer; leverage inflates return AND drawdown so a "
+             "high score with low MAR is fragile), maxDD = worst peak-to-trough, avg_lev = average "
+             "exposure (1.0 = fully long). Prefer structures with high score AND high MAR:"]
     for p in shown:
         d = p.get("diagnostics", {})
-        parts.append(f"# median_oos={d.get('median_oos', float('nan')):+.3f}  "
-                     f"positive_splits={d.get('frac_positive', float('nan')):.0%}  "
-                     f"consistency_std={d.get('std_oos', float('nan')):.2f}\n{p['code'].strip()}")
+        parts.append(
+            f"# score={d.get('median_oos', float('nan')):+.3f}  "
+            f"excess_ret={d.get('median_return', float('nan')):+.0%}  "
+            f"Sharpe={d.get('median_sharpe', float('nan')):+.2f}  "
+            f"MAR={d.get('mar', float('nan')):.2f}  "
+            f"maxDD=-{d.get('maxdd', float('nan')):.0%}  "
+            f"avg_lev={d.get('avg_exposure', float('nan')):.2f}x  "
+            f"pos_splits={d.get('frac_positive', float('nan')):.0%}\n{p['code'].strip()}")
     if len(rows) > MAX:
         parts.append(f"# (+{len(rows) - MAX} more tried, scoring in between — not shown)")
     best = rows[0].get("score", float("nan")) if rows else float("nan")
@@ -191,5 +200,7 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
             f"holding). Beat it by TIMING exposure better — change the STRUCTURE (a nonlinear regime "
             f"switch or threshold gate per rule 2) so you are OUT or SHORT during bad stretches and "
             f"invested during good ones. Remember: always-long, or long-whenever-a-trend-is-up, "
-            f"scores ~0 — the score only rewards being right about WHEN. Do not repeat a structure "
-            f"already listed. Return only the ```python code block.")
+            f"scores ~0 — the score only rewards being right about WHEN. And prefer a HIGH MAR: a big "
+            f"score bought with reckless leverage (huge maxDD, low MAR) is fragile — concentrate any "
+            f"leverage in the calmest, highest-conviction regimes and cut it in stress. Do not repeat "
+            f"a structure already listed. Return only the ```python code block.")
