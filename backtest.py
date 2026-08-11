@@ -240,7 +240,8 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
     pos_list = []
     for p in configs:
         try:
-            sig = strategy_fn(data, tools, p)
+            with np.errstate(divide="ignore", invalid="ignore"):   # constant-0 signals warn benignly
+                sig = strategy_fn(data, tools, p)
             pos = (sig.reindex(close.index).replace([np.inf, -np.inf], np.nan)
                    .fillna(0.0).clip(-1.0, 1.0).to_numpy())
         except Exception:
@@ -261,7 +262,10 @@ def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offse
         rng = np.random.default_rng(seed + 1)
         shift_offsets = rng.integers(1, max(2, n), size=n_shifts)
     null = np.array([maxscore(k) for k in shift_offsets], dtype=float)
-    pval = float((null >= real).mean())
+    # (b+1)/(m+1), NOT b/m: the naive fraction can return exactly 0, which is not a valid p-value
+    # and is biased low by ~1/m (Phipson & Smyth 2010). The floor is 1/(m+1).
+    b, m = int((null >= real).sum()), int(len(null))
+    pval = float((b + 1) / (m + 1))
     exposure = float(np.mean([np.mean(np.abs(pp)) for pp in pos_list])) if pos_list else float("nan")
     return {"pvalue": pval, "real": float(real), "null_mean": float(null.mean()),
             "null_sd": float(null.std()), "null_q95": float(np.quantile(null, 0.95)),

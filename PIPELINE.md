@@ -67,8 +67,8 @@ fitness = median_i(s_i)                                                 # diag["
 ```
 
 - `fit_on_mask` fits parameters with SciPy `differential_evolution` (continuous search), budget
-  `fit_budget` (default 200 function evals). This is the expensive part: ~100 fits × ~hundreds of
-  backtests each ≈ ~10^5 backtests per candidate.
+  `fit_budget` (default 200 function evals — `maxiter` is derived so total evals ≈ `fit_budget`).
+  This is the expensive part: ~100 fits × ~200 backtests each ≈ **2×10⁴** backtests per candidate.
 - Reported alongside: OOS Sharpe, OOS annualized return, fraction of positive splits.
 
 ## 5. The evolution loop — `evolve.py: Evolver.run / step`
@@ -111,8 +111,9 @@ code, non-`Series` output, non-finite fitness, and duplicates.
 
 ## 7. The skill test — selection-aware shift-the-signal — `backtest.py: shift_null_pvalue`
 
-The question: *could random re-timing of this structure's own positions, searched exactly this
-hard, have produced its in-sample score?* If yes, the apparent edge is not timing skill.
+The question: *could random re-timing of this structure's own positions, under a fixed uniform
+search over P configs, have produced its in-sample score?* If yes, the apparent edge is not timing
+skill.
 
 ```
 configs = sample P configs uniformly from the structure's param space     # sample_configs
@@ -120,7 +121,7 @@ for each config: position series on the REAL pool                          # cli
 real  = max over configs of  _score_position(pos)                          # the selection you do
 for each fixed random circular shift k (common random numbers):
     null_k = max over configs of  _score_position( roll(pos, k) )          # same P, re-timed
-p = fraction of { null_k } that are >= real
+b = #{ null_k >= real };  p = (b + 1) / (m + 1)     # NOT b/m — a permutation p is never 0
 ```
 
 Why this null, and not the earlier ones:
@@ -131,19 +132,27 @@ Why this null, and not the earlier ones:
   tested. (The earlier sign-flip null destroyed the drift and just tested "are you net long?"; the
   block bootstrap over-corrected and was poorly calibrated. Both are abandoned. The dead
   `build_null_closes` / `null_max_bar_ccv` helpers remain in `backtest.py` but are unused.)
-- **Selection-aware**: `real` and every null draw take the max over the *same* P configs, so the
-  "I tried many settings and kept the best" inflation appears on both sides and cancels. That is
-  what makes the per-candidate p-value honest about the search that produced it.
+- **Selection-aware, but only w.r.t. uniform sampling**: `real` and every null draw take the max
+  over the *same* P uniformly-sampled configs, so the "I tried many settings and kept the best"
+  inflation appears on both sides and cancels. Caveat: the *fitness* (§4) selects with
+  `differential_evolution`, which searches materially harder than a uniform max over P — on a
+  no-skill surface DE extracts ~0.19 more Sharpe from noise at 6 knobs than max-of-256 uniform. So
+  this test is an internally-valid test of *the structure under a fixed uniform search*; it does
+  **not** fully price in the DE fit that produced the champion, and would under-correct a
+  DE-overfit champion. (Diagnostic: compare the test's `real` to the recorded DE fit score; if they
+  diverge, P is too small.)
 - **Buy-and-hold lands exactly on the bar** (a constant position is unchanged by a shift, so its
   real score equals every null score → p = 1.0). That is the correct zero point: the test is
   **indifferent** to pure exposure, and measures exposure *management*, blind to exposure *level*.
 
 Calibration (real NVDA pool, verified): buy-and-hold p = 1.00 (lands on the bar), the seeds
-p ≈ 0.16–0.48 (no significant timing skill), a look-ahead perfect-timing position p = 0.00.
+p ≈ 0.16–0.48 (no significant timing skill), a look-ahead perfect-timing position p = the floor
+`1/(m+1)` (it maxes out the statistic; the estimator never reports 0).
 
 Cost: cheap — P strategy evaluations + P×(shifts) array scorings (no re-fitting). Runs on every
 candidate. Shift offsets are generated once at run start and reused for every candidate (common
-random numbers), so the bar is a consistent comparison across candidates.
+random numbers), so the bar is a consistent comparison across candidates. Per-candidate m is small
+(50 → floor ~0.02); the champion recompute uses m ≥ 300 (floor ~0.003).
 
 **This is report-only.** `n_skill_significant` counts candidates with p < 0.05; the per-candidate
 p is logged as `skill_p=`; selection remains purely by fitness (§4).
@@ -168,11 +177,17 @@ selection-aware test in-sample and the benchmark out-of-sample.
 
 ## 9. What the NVDA experiments found
 
-Under the corrected skill test, the evolved structures do **not** show significant timing skill on
-NVDA (champion p-values well above 0.05), and on the sealed holdout they do not beat buy-and-hold.
-The honest reading: the search finds structures that fit the in-sample data, but their edge is not
-distinguishable from random re-timing of their own exposure, and buy-and-hold — a strong benchmark
-for a single high-drift name — is not beaten out of sample.
+Under the corrected skill test, the evolved structures' champion p-values sit well above 0.05, so
+the test **fails to detect** timing skill on NVDA — and on the sealed holdout the champion does not
+beat buy-and-hold. State it as "not detected," **not** "no skill exists": the test's power against
+the *exposure-management* class (cut risk in genuinely worse windows) is low — synthetic checks put
+it around ~16% at a realistic effect size, versus ~100% against directional timing. That is exactly
+the mechanism the champion is described as using (risk control, not return), so a high p-value here
+is consistent with both "no skill" and "real but modest skill this sample cannot resolve." The
+defensible reading: the search finds structures that fit the in-sample data; their timing is not
+shown to beat random re-timing of their own exposure; and buy-and-hold — a strong benchmark for a
+single high-drift name — is not beaten out of sample. (Power figure caveat: it depends on the
+injected effect size; the qualitative gap vs directional timing is robust, the exact 16% is not.)
 
 ## 10. Configuration & files
 
@@ -193,9 +208,25 @@ Key CLI flags (`python run.py --help`): `--ticker --holdout-year --objective {sh
 
 ## 11. Known limitations / not yet done
 
-- **Fitness still uses per-split `differential_evolution`** (the ~10^5-backtests path). The
+- **Low power against exposure-management skill** (§9): the skill test detects directional timing
+  well but risk-control timing only ~16% of the time at a realistic effect size, so a negative
+  result means "not detected," not "absent."
+- **Skill test under-corrects for the real search** (§7): it selects by a uniform max over P
+  configs; the fitness selects by `differential_evolution`, which digs deeper into noise. The
+  p-value is valid for the structure-under-uniform-search, not for the DE-fitted champion.
+- **No multiple-testing correction**: `n_skill_significant` counts p<0.05 across ~50 candidates,
+  where ~2.5 are expected by chance; it needs a Benjamini–Hochberg / FDR adjustment. And the
+  champion's p is *selected-on* (fitness correlates with the skill statistic), so it is biased low
+  — fine while results are negative, but it would overstate a borderline champion.
+- **Adjacent-quarter CV contamination**: the backtest runs on the whole pool then masks (needed for
+  indicator warm-up, causally correct), so each test quarter's opening positions warm up on
+  training-quarter prices the params were chosen on. Not look-ahead, but a mild optimism in the OOS
+  estimate. Contiguous blocks + a short embargo (hv-block CV, Racine 2000) would reduce it.
+- **Fitness still uses per-split `differential_evolution`** (the ~2×10⁴-backtests path). The
   precompute-the-config-matrix idea (sample N configs once, argmax per split) is implemented for
   the *skill test* but **not** for the CV fitness, so exhaustive splits are not yet cheap there.
+- **Sharpe has no risk-free adjustment** (§2); over 2017–2024 (near-zero rates → a hiking cycle) the
+  excess-return Sharpe is modestly lower.
 - **`min_sharpe` penalty units** (`10×`) mix return and Sharpe; not re-tuned.
 - **Behavioural dedup** keys on the midpoint-param signal; two structures identical at midpoint but
   different elsewhere could false-merge.
