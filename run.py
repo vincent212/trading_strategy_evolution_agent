@@ -141,9 +141,25 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
             hold_by_year[str(int(y))] = {
                 "strategy_sharpe": bt._sharpe_arr(sr),
                 "strategy_return": float(np.prod(1.0 + sr[np.isfinite(sr)]) - 1.0),
+                "strategy_maxdd": bt._max_drawdown_arr(sr),
+                "strategy_mar": bt._mar_arr(sr),
                 "buyhold_sharpe": bt._sharpe_arr(br),
                 "buyhold_return": float(np.prod(1.0 + br[np.isfinite(br)]) - 1.0),
+                "buyhold_maxdd": bt._max_drawdown_arr(br),
+                "buyhold_mar": bt._mar_arr(br),
             }
+        # in-sample (pool 2017..holdout) champion risk profile — where leverage shows its bill
+        pm = years < holdout_year
+        sp, bp = strat_ret[pm], bh_ret[pm]
+        insample_risk = {
+            "strategy_sharpe": bt._sharpe_arr(sp), "strategy_cagr": bt._cagr_arr(sp),
+            "strategy_maxdd": bt._max_drawdown_arr(sp), "strategy_mar": bt._mar_arr(sp),
+            "buyhold_sharpe": bt._sharpe_arr(bp), "buyhold_cagr": bt._cagr_arr(bp),
+            "buyhold_maxdd": bt._max_drawdown_arr(bp), "buyhold_mar": bt._mar_arr(bp),
+            "avg_exposure": float(np.nanmean(np.clip(
+                strat(full, tools, p_full).reindex(full.index).to_numpy()[pm], -9, 9))),
+        }
+        hold_by_year["_insample"] = insample_risk
 
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -214,9 +230,20 @@ def _print_report(r, log):
         + ("n/a" if hs is None else f"{hs:.3f}")
         + f"   return " + ("n/a" if hr is None else f"{hr:+.1%}")
         + "   (measured once, never searched)")
-    for y, m in sorted(c.get("holdout_by_year", {}).items()):
-        log(f"  {y}: strategy Sharpe {m['strategy_sharpe']:+.2f} return {m['strategy_return']:+.1%}"
-            f"   |  buy&hold Sharpe {m['buyhold_sharpe']:+.2f} return {m['buyhold_return']:+.1%}")
+    hby = c.get("holdout_by_year", {})
+    ins = hby.get("_insample")
+    if ins:
+        log(f"in-sample risk (pool)     : strategy Sharpe {ins['strategy_sharpe']:+.2f} "
+            f"CAGR {ins['strategy_cagr']:+.0%} maxDD -{ins['strategy_maxdd']:.0%} "
+            f"MAR {ins['strategy_mar']:.2f} avg-exposure {ins['avg_exposure']:.2f}x")
+        log(f"                            buy&hold Sharpe {ins['buyhold_sharpe']:+.2f} "
+            f"CAGR {ins['buyhold_cagr']:+.0%} maxDD -{ins['buyhold_maxdd']:.0%} "
+            f"MAR {ins['buyhold_mar']:.2f}")
+    for y, m in sorted((k, v) for k, v in hby.items() if k != "_insample"):
+        log(f"  {y}: strategy Sh {m['strategy_sharpe']:+.2f} ret {m['strategy_return']:+.1%} "
+            f"maxDD -{m['strategy_maxdd']:.0%} MAR {m['strategy_mar']:.2f}"
+            f"   |  B&H Sh {m['buyhold_sharpe']:+.2f} ret {m['buyhold_return']:+.1%} "
+            f"maxDD -{m['buyhold_maxdd']:.0%} MAR {m['buyhold_mar']:.2f}")
     log("-" * 70)
     sp = c.get("skill_pvalue", float("nan"))
     if sp == sp:                                          # not NaN

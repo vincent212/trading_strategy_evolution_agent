@@ -361,10 +361,12 @@ class Evolver:
             if it % log_every == 0:
                 cs = ("dup" if self._last_cached else
                       (f"{child.score:+.3f}" if child else "REJECT"))
+                sh = (f" Sh={child.diagnostics.get('median_sharpe', float('nan')):+.2f}"
+                      if child is not None else "")
                 skp = (f" skill_p={self._last_skill_p:.2f}"
                        if child is not None and np.isfinite(self._last_skill_p) else "")
                 tag = " EXPLORE" if self._last_explore else ""
-                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}{skp}  "
+                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}{sh}{skp}  "
                          f"pop={len(self.db.all_programs())} rej={self.n_rejected} "
                          f"sig={self.n_skill_significant} dup={self.n_dup} "
                          f"fixed={self.n_selfcorrected}")

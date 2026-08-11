@@ -73,6 +73,33 @@ def _ann_return_arr(r: np.ndarray, min_obs: int = 20) -> float:
     return float(m * PERIODS_PER_YEAR) if np.isfinite(m) else 0.0
 
 
+def _max_drawdown_arr(r: np.ndarray) -> float:
+    """Max drawdown of a net-return stream, as a POSITIVE fraction (0.30 = a 30% drawdown)."""
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return 0.0
+    eq = np.cumprod(1.0 + r)
+    dd = eq / np.maximum.accumulate(eq) - 1.0
+    return float(-dd.min())
+
+
+def _cagr_arr(r: np.ndarray) -> float:
+    """Compound annual growth rate of a net-return stream."""
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return 0.0
+    total = float(np.prod(1.0 + r))
+    yrs = r.size / PERIODS_PER_YEAR
+    return float(total ** (1.0 / yrs) - 1.0) if yrs > 0 and total > 0 else float("nan")
+
+
+def _mar_arr(r: np.ndarray) -> float:
+    """MAR ratio = CAGR / max drawdown — return per unit of worst-case pain. Leverage inflates
+    CAGR but inflates drawdown just as much, so MAR is where levered strategies get exposed."""
+    mdd = _max_drawdown_arr(r)
+    return float(_cagr_arr(r) / mdd) if mdd > 1e-9 else float("nan")
+
+
 def _score_arr(r: np.ndarray, objective: str = "sharpe",
                min_sharpe: float = 0.8, penalty: float = 10.0) -> float:
     """The scalar the search MAXIMIZES for a return stream.
