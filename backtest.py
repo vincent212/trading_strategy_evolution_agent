@@ -2,19 +2,19 @@
 Evaluation engine for TRAINABLE strategies.
 
 Pipeline (per candidate):
-  1. run_backtest / sharpe   — a fitted strategy -> net return stream -> Sharpe.
+  1. run_backtest / sharpe   — a fitted strategy -> net return stream -> score.
                                A 1-bar execution lag is applied here.
   2. make_quarter_splits     — cut the (pre-holdout) history into calendar quarters
                                and draw 100 random 75/25 quarter splits.
   3. fit_on_mask             — on each split's 75% train quarters, tune the strategy's
-                               params with SciPy differential evolution to MAXIMIZE
-                               train Sharpe. (This is 'training' — the LLM doesn't do it.)
+                               params with SciPy differential evolution to MAXIMIZE the
+                               train objective. (This is 'training' — the LLM doesn't do it.)
   4. ccv_median_oos          — score the fitted params on the 25% test quarters -> one
-                               OOS Sharpe per split; take the MEDIAN over the 100 splits.
+                               OOS score per split; take the MEDIAN over the 100 splits.
                                That median is the fitness the evolutionary loop maximizes.
-  5. null_max_bar_ccv        — run the SAME fit+CCV on sign-flipped (pure-noise) returns;
-                               the best median-OOS the search can wring out of noise is
-                               the null-max bar. The real median OOS must clear it.
+  5. shift_null_pvalue       — REPORT-ONLY skill test: selection-aware shift-the-signal
+                               permutation p-value (does the timing beat a random re-timing
+                               of the structure's own positions?). Logged, not a filter.
 
 The signal is always computed on the FULL continuous series (so indicators stay
 causal); the train/test split only selects which dates' returns are scored. Whole
@@ -29,15 +29,60 @@ import params as P
 
 PERIODS_PER_YEAR = 252
 
+# Intraday stop-loss: NOT a fixed overlay — each strategy OPTS IN by declaring a `stop_loss` param
+# (0 = off), which the optimizer tunes; run_backtest receives that fitted level per candidate. A
+# stop of `s` means: measured from the OPEN, if the adverse intraday excursion (the day's LOW for a
+# long, HIGH for a short) reaches -s, the position is stopped out and the day's realised move is
+# capped at -(s + STOP_SLIP) intraday (slippage). Overnight gaps are NOT stopped. Needs OHLC.
+STOP_SLIP = 0.001                                          # fixed slippage on a stopped day (realism)
+
+
+def _stopped_returns(data: pd.DataFrame, stop: float, slip: float):
+    """Per-day asset PRICE return under the intraday stop, for a LONG and for a SHORT position.
+    Returns (ret_long, ret_short) arrays; run_backtest picks per-bar by the held position's sign."""
+    stop, slip = float(stop), float(slip)
+    o = data["open"].to_numpy(); h = data["high"].to_numpy()
+    lo = data["low"].to_numpy(); c = data["close"].to_numpy()
+    pc = np.empty_like(c); pc[0] = c[0]; pc[1:] = c[:-1]        # prior close
+    gap = o / pc - 1.0                                          # overnight (never stopped)
+    normal = c / pc - 1.0                                       # unstopped close-to-close
+    long_hit = lo <= o * (1.0 - stop)                          # intraday dropped >= stop below open
+    ret_long = np.where(long_hit, (1.0 + gap) * (1.0 - stop - slip) - 1.0, normal)
+    short_hit = h >= o * (1.0 + stop)                          # intraday rose >= stop above open
+    ret_short = np.where(short_hit, (1.0 + gap) * (1.0 + stop + slip) - 1.0, normal)
+    return ret_long, ret_short
+
 
 # ---- core backtest ----------------------------------------------------------
 
-def run_backtest(signal: pd.Series, close: pd.Series,
-                 cost_per_turn: float = 0.0005) -> pd.Series:
-    """Fitted signal -> net daily returns, with a 1-bar execution lag and costs."""
-    asset_ret = close.pct_change().fillna(0.0)
-    pos = signal.reindex(close.index).replace([np.inf, -np.inf], np.nan)
-    pos = pos.fillna(0.0).clip(-1.0, 1.0).shift(1).fillna(0.0)   # decide t-1, hold t
+def as_position_series(sig, index) -> pd.Series:
+    """Coerce a strategy's raw output to a position Series aligned to `index`. Accepts a pandas
+    Series (reindexed) OR a bare numpy array — e.g. the result of np.where, which drops the pandas
+    index and is aligned positionally in row order. A wrong-length / non-array output raises here
+    (ValueError) and is treated as an invalid strategy upstream. This is the ONE place the
+    signal->position contract lives; run_backtest, the shift test, evaluate() and the champion
+    report all route through it so they can't diverge."""
+    if isinstance(sig, pd.Series):
+        return sig.reindex(index)
+    return pd.Series(np.asarray(sig, dtype=float).ravel(), index=index)
+
+
+def run_backtest(signal: pd.Series, data, cost_per_turn: float = 0.0005,
+                 stop: float = 0.0) -> pd.Series:
+    """Fitted signal -> net daily returns, with a 1-bar execution lag and costs. `stop` > 0 applies
+    the strategy's fitted intraday stop-loss (needs `data` to be the OHLC DataFrame with open/high/
+    low); stop <= 0 or a close-only Series is plain close-to-close (e.g. the unstopped benchmark)."""
+    import alpha_tools
+    lev = float(alpha_tools.MAX_LEVERAGE)                        # same position cap as clip_signal
+    is_df = isinstance(data, pd.DataFrame)
+    close = data["close"] if is_df else data
+    pos = as_position_series(signal, close.index).replace([np.inf, -np.inf], np.nan)
+    pos = pos.fillna(0.0).clip(-lev, lev).shift(1).fillna(0.0)   # decide t-1, hold t
+    if stop and stop > 0.0 and is_df and {"open", "high", "low"}.issubset(data.columns):
+        rl, rs = _stopped_returns(data, stop, STOP_SLIP)        # stop the day the position holds
+        asset_ret = pd.Series(np.where(pos.to_numpy() >= 0.0, rl, rs), index=close.index)
+    else:
+        asset_ret = close.pct_change().fillna(0.0)
     turnover = pos.diff().abs().fillna(0.0)
     return pos * asset_ret - cost_per_turn * turnover
 
@@ -67,6 +112,39 @@ def _ann_return_arr(r: np.ndarray, min_obs: int = 20) -> float:
         return 0.0
     m = r.mean()
     return float(m * PERIODS_PER_YEAR) if np.isfinite(m) else 0.0
+
+
+def _max_drawdown_arr(r: np.ndarray) -> float:
+    """Max drawdown of a net-return stream, as a POSITIVE fraction (0.30 = a 30% drawdown)."""
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return 0.0
+    eq = np.cumprod(1.0 + r)
+    dd = eq / np.maximum.accumulate(eq) - 1.0
+    return float(-dd.min())
+
+
+def _cagr_arr(r: np.ndarray) -> float:
+    """Compound annual growth rate of a net-return stream. A levered/short stream can drive
+    cumulative wealth to <= 0 (a >=100% loss); report that as -100%/yr (a total wipeout) rather
+    than NaN, so MAR stays finite and the prompt/report don't show garbage."""
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return 0.0
+    total = float(np.prod(1.0 + r))
+    yrs = r.size / PERIODS_PER_YEAR
+    if yrs <= 0:
+        return float("nan")
+    if total <= 0:
+        return -1.0                                          # blew up: treat as total loss
+    return float(total ** (1.0 / yrs) - 1.0)
+
+
+def _mar_arr(r: np.ndarray) -> float:
+    """MAR ratio = CAGR / max drawdown — return per unit of worst-case pain. Leverage inflates
+    CAGR but inflates drawdown just as much, so MAR is where levered strategies get exposed."""
+    mdd = _max_drawdown_arr(r)
+    return float(_cagr_arr(r) / mdd) if mdd > 1e-9 else float("nan")
 
 
 def _score_arr(r: np.ndarray, objective: str = "sharpe",
@@ -110,10 +188,18 @@ def make_quarter_splits(index: pd.DatetimeIndex, n_splits: int = 100,
 
 # ---- fit (training) ---------------------------------------------------------
 
+def buyhold_returns(close, cost: float = 0.0005) -> np.ndarray:
+    """Net-return stream of a constant fully-long position — the buy-and-hold benchmark."""
+    return run_backtest(pd.Series(1.0, index=close.index), close, cost).to_numpy()
+
+
 def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
                 mask: np.ndarray, budget: int = 200, cost: float = 0.0005,
-                seed: int = 0, objective: str = "sharpe", min_sharpe: float = 0.8) -> dict:
+                seed: int = 0, objective: str = "sharpe", min_sharpe: float = 0.8,
+                benchmark_ret=None) -> dict:
     """Tune params to MAXIMIZE the objective over the `mask` dates via differential evolution.
+    If benchmark_ret is given, the strategy is scored on its ACTIVE return (strategy − benchmark),
+    so the fit optimizes risk-adjusted OUTPERFORMANCE of the benchmark, not raw exposure.
     Returns the fitted params dict (empty if the strategy declares no parameters)."""
     names, bounds, kinds, extra = P.parse_space(space)
     close = data["close"]
@@ -123,7 +209,10 @@ def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
     def neg_score(x):
         p = P.decode(x, names, kinds, extra)
         try:
-            r = run_backtest(strategy_fn(data, tools, p), close, cost).to_numpy()
+            r = run_backtest(strategy_fn(data, tools, p), data, cost,
+                             stop=p.get("stop_loss", 0.0)).to_numpy()
+            if benchmark_ret is not None:
+                r = r - benchmark_ret                        # active return vs buy-and-hold
             return -_score_arr(r[mask], objective, min_sharpe)
         except Exception:
             return 10.0
@@ -139,15 +228,21 @@ def fit_on_mask(strategy_fn, space: dict, data: pd.DataFrame, tools,
 # ---- cross-validated OOS (the fitness) -------------------------------------
 
 def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
-                   cost=0.0005, jobs=1, seed=0, objective="sharpe", min_sharpe=0.8) -> dict:
+                   cost=0.0005, jobs=1, seed=0, objective="sharpe", min_sharpe=0.8,
+                   benchmark_ret=None) -> dict:
     """Fit on each split's train quarters, score OOS on its test quarters. `median_oos` is the
     median per-split OOS OBJECTIVE score (the fitness the evolutionary loop maximizes); the
-    OOS Sharpe and OOS annual return are always reported alongside it."""
+    OOS Sharpe and OOS annual return are always reported alongside it. If benchmark_ret is given,
+    every score is on the ACTIVE return (strategy − benchmark), so the fitness is risk-adjusted
+    OUTPERFORMANCE of buy-and-hold — a strategy that merely holds the asset scores 0, not positive."""
     def one(i):
         train_mask, test_mask = splits[i]
         p = fit_on_mask(strategy_fn, space, data, tools, train_mask, budget, cost,
-                        seed + i, objective, min_sharpe)
-        r = run_backtest(strategy_fn(data, tools, p), data["close"], cost).to_numpy()
+                        seed + i, objective, min_sharpe, benchmark_ret=benchmark_ret)
+        r = run_backtest(strategy_fn(data, tools, p), data, cost,
+                         stop=p.get("stop_loss", 0.0)).to_numpy()
+        if benchmark_ret is not None:
+            r = r - benchmark_ret                            # active return vs buy-and-hold
         rt = r[test_mask]
         return (_score_arr(rt, objective, min_sharpe), _sharpe_arr(rt), _ann_return_arr(rt))
 
@@ -173,42 +268,127 @@ def ccv_median_oos(strategy_fn, space, data, tools, splits, budget=200,
 
 
 def fit_full(strategy_fn, space, data, tools, budget=400, cost=0.0005, seed=0,
-             objective="sharpe", min_sharpe=0.8) -> dict:
+             objective="sharpe", min_sharpe=0.8, benchmark_ret=None) -> dict:
     """Fit params on ALL of `data` (used for the champion before the final holdout)."""
     mask = np.ones(len(data), dtype=bool)
     return fit_on_mask(strategy_fn, space, data, tools, mask, budget, cost, seed,
-                       objective, min_sharpe)
+                       objective, min_sharpe, benchmark_ret=benchmark_ret)
 
 
-# ---- the null-max bar (capacity gate, on the CCV OOS) -----------------------
+# ---- selection-aware SHIFT-THE-SIGNAL skill test (the real per-candidate gate) --------------
 
-def null_max_bar_ccv(strategy_fn, space, data, tools, splits, budget=200,
-                     cost=0.0005, n_sims=10, seed=0, jobs=1, quantile=0.95,
-                     objective="sharpe", min_sharpe=0.8) -> dict:
-    """Run the SAME fit+CCV on sign-flipped (pure-noise) returns, n_sims times, and
-    return a high quantile of the resulting median-OOS values as the noise ceiling.
-
-    A real strategy's median OOS Sharpe must clear this bar: on genuine noise, fitting
-    the train quarters cannot generalize to the test quarters, so the median-OOS the
-    search can achieve here is what luck alone buys. Fed the CCV OOS number, not an
-    in-sample one.
-    """
-    ret = data["close"].pct_change().fillna(0.0).to_numpy()
-    idx = data.index
+def sample_configs(space, n_configs=64, seed=0):
+    """Sample n_configs parameter dicts uniformly from the structure's param space.
+    A parameterless structure (e.g. buy & hold) yields exactly one config."""
+    names, bounds, kinds, extra = P.parse_space(space)
+    if not bounds:
+        return [{}]
     rng = np.random.default_rng(seed)
-    meds = np.empty(n_sims)
-    for s in range(n_sims):
-        eps = rng.choice([-1.0, 1.0], size=len(ret))
-        fake_close = pd.Series(100.0 * np.cumprod(1.0 + ret * eps), index=idx)
-        fdata = data.copy()
-        fdata["close"] = fake_close
-        res = ccv_median_oos(strategy_fn, space, fdata, tools, splits, budget,
-                             cost, jobs, seed=10_000 + s, objective=objective,
-                             min_sharpe=min_sharpe)
-        meds[s] = res["median_oos"]
-    return {
-        "bar": float(np.quantile(meds, quantile)),
-        "mean_noise_median": float(meds.mean()),
-        "max_noise_median": float(meds.max()),
-        "n_sims": int(n_sims),
-    }
+    out = []
+    for _ in range(int(n_configs)):
+        x = np.array([rng.uniform(lo, hi) for (lo, hi) in bounds])
+        out.append(P.decode(x, names, kinds, extra))
+    return out
+
+
+def _score_position(pos, asset_ret, cost, objective, min_sharpe, benchmark_ret=None):
+    """Score a raw position array exactly like run_backtest: 1-bar execution lag, cost on turnover.
+    Keep this numerically identical to run_backtest — test_shift_gate.py::test_score_position_matches
+    guards it (the skill test must price trades the same way the fitness/holdout do). If benchmark_ret
+    is given, score the ACTIVE return (position − benchmark) so the skill test matches the excess-vs-
+    buy-and-hold fitness (buy-and-hold then scores 0 and the shift test is neutral to it)."""
+    held = np.empty(len(pos), dtype=float)               # float: never truncate an int input
+    held[0] = 0.0
+    held[1:] = pos[:-1]                                   # decide t-1, hold t (no lookahead)
+    turn = np.abs(np.diff(held, prepend=0.0))
+    r = held * asset_ret - cost * turn
+    if benchmark_ret is not None:
+        r = r - benchmark_ret
+    return _score_arr(r, objective, min_sharpe)
+
+
+def make_shift_offsets(n, n_shifts, seed=0, min_gap=250):
+    """Random circular shift offsets that EXCLUDE near-identity shifts (within min_gap of 0 or n).
+    A shift of a few bars barely moves a slow position, so it is not a genuine null draw and inflates
+    the p-value. Draws from [min_gap, n - min_gap]; min_gap should exceed the longest indicator
+    lookback (~250).
+
+    The exclusion band needs 2*min_gap < n. If the series is too short to honour min_gap (< ~3x it),
+    we keep the widest valid band (n//3 each side) so the offsets stay valid, and WARN — because the
+    near-identity exclusion the p-value relies on is then weaker than advertised."""
+    import warnings
+    gap = int(min_gap)
+    if 2 * gap >= n:                                    # too short to honour the requested gap
+        gap = max(1, n // 3)
+        warnings.warn(f"make_shift_offsets: n={n} too short for min_gap={min_gap}; using {gap}. "
+                      f"Near-identity shift exclusion is weaker than advertised — the skill "
+                      f"p-value may be inflated for slow structures on this ticker.", stacklevel=2)
+    hi = max(gap + 1, n - gap)
+    return np.random.default_rng(seed).integers(gap, hi, size=int(n_shifts))
+
+
+def shift_null_pvalue(strategy_fn, space, data, tools, n_configs=64, shift_offsets=None,
+                      n_shifts=50, cost=0.0005, seed=0, objective="sharpe", min_sharpe=0.8,
+                      benchmark_ret=None):
+    """Selection-aware SHIFT-THE-SIGNAL skill test (in-sample, per candidate). Guards against luck:
+    is the score reproducible by a random re-timing of the structure's own positions? When
+    benchmark_ret is given it scores the ACTIVE return (strategy − benchmark), matching the
+    excess-vs-buy-and-hold fitness — so it asks whether the OUTPERFORMANCE of buy-and-hold is real
+    or monkey-generatable, not whether raw exposure is.
+
+    The null keeps the asset returns and each config's exposure profile EXACTLY, and destroys ONLY
+    the alignment between signal and return by circularly shifting the position series. Buy & hold
+    (a constant position, unchanged by a shift) lands exactly on the bar by construction.
+
+    Selection-aware: `real` and every null draw take the MAX over the SAME n_configs sampled configs,
+    so the 'I tried many settings and kept the best' inflation appears on both sides and cancels.
+
+    p = fraction of null draws (each a max over configs under a random shift) that meet or beat the
+    real max. p<0.05 => timing skill beyond what searching this structure this hard can fake."""
+    close = data["close"]
+    asset_ret = close.pct_change().fillna(0.0).to_numpy()
+    n = len(asset_ret)
+    configs = sample_configs(space, n_configs, seed)
+    pos_list = []
+    for p in configs:
+        try:
+            with np.errstate(divide="ignore", invalid="ignore"):   # constant-0 signals warn benignly
+                sig = strategy_fn(data, tools, p)
+            import alpha_tools
+            lev = float(alpha_tools.MAX_LEVERAGE)
+            pos = (as_position_series(sig, close.index).replace([np.inf, -np.inf], np.nan)
+                   .fillna(0.0).clip(-lev, lev).to_numpy())
+        except Exception:
+            pos = np.zeros(n)
+        pos_list.append(np.asarray(pos, dtype=float))    # .to_numpy() is already C-contiguous float
+
+    def maxscore(shift):
+        # np.roll is circular, so a shifted draw has one wrap-seam transition the unshifted `real`
+        # does not — a one-directional cost asymmetry of at most ~2*cost over ~n bars. Verified
+        # immaterial (<0.001 total return over 2000 bars); left as-is rather than special-cased.
+        best = float("-inf")
+        for pos in pos_list:
+            pp = pos if shift == 0 else np.roll(pos, int(shift))
+            s = _score_position(pp, asset_ret, cost, objective, min_sharpe, benchmark_ret)
+            if s > best:
+                best = s
+        return best
+
+    real = maxscore(0)
+    if shift_offsets is None:
+        shift_offsets = make_shift_offsets(n, n_shifts, seed + 1)
+    null = np.array([maxscore(k) for k in shift_offsets], dtype=float)
+    if null.size == 0:                                   # no shifts (e.g. n_shifts=0): undefined test
+        return {"pvalue": float("nan"), "real": float(real), "null_mean": float("nan"),
+                "null_sd": float("nan"), "null_q95": float("nan"),
+                "n_configs": len(configs), "n_shifts": 0,
+                "exposure": float(np.mean([np.mean(np.abs(pp)) for pp in pos_list]))
+                if pos_list else float("nan")}
+    # (b+1)/(m+1), NOT b/m: the naive fraction can return exactly 0, which is not a valid p-value
+    # and is biased low by ~1/m (Phipson & Smyth 2010). The floor is 1/(m+1).
+    b, m = int((null >= real).sum()), int(len(null))
+    pval = float((b + 1) / (m + 1))
+    exposure = float(np.mean([np.mean(np.abs(pp)) for pp in pos_list])) if pos_list else float("nan")
+    return {"pvalue": pval, "real": float(real), "null_mean": float(null.mean()),
+            "null_sd": float(null.std()), "null_q95": float(np.quantile(null, 0.95)),
+            "n_configs": len(configs), "n_shifts": int(len(null)), "exposure": exposure}

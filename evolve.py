@@ -1,12 +1,11 @@
 """
 Evolutionary search over trainable strategies.
 
-The program database is divided into islands (independent sub-populations). Each
-step samples two high-scoring parents from one island, asks the model for an
-improved child, evaluates the child by quarter cross-validation (fit on train
-quarters, score OOS on test quarters, median over 100 splits), and inserts it
-back into that island. Every `reset_every` steps the lower-scoring half of the
-islands are cleared and reseeded from the best strategy found so far.
+A single evolving population. Each step shows the model the WHOLE scored history, asks for an
+improved child, evaluates it by quarter cross-validation (fit on train quarters, score OOS on test
+quarters, median over 100 splits — on the active return vs buy-and-hold), and inserts it into the
+pool. Every `reset_every` steps the lower-scoring half of the pool is culled to purge stagnation
+(the champion always survives).
 
 Candidate code is executed via exec() in a restricted namespace. This is a
 constraint on convenience, not a security boundary; run only inspected code.
@@ -70,52 +69,29 @@ class Program:
 
 
 class ProgramDatabase:
-    def __init__(self, n_islands=4, temperature=0.7, seed=0):
-        self.islands: list[list[Program]] = [[] for _ in range(n_islands)]
-        self.temperature = temperature
+    """A single evolving population. `reset()` periodically culls the weakest half to purge
+    stagnation (the champion always survives). There used to be 4 'islands', but the mutation
+    prompt always drew on the whole population (all_programs), so they never isolated sub-
+    populations and had no crossover — they only ever drove this cull."""
+    def __init__(self, seed=0):
+        self.pool: list[Program] = []
         self.rng = random.Random(seed)
 
-    def add(self, island, prog):
-        self.islands[island].append(prog)
+    def add(self, prog):
+        self.pool.append(prog)
 
     def best(self):
-        allp = self.all_programs()
-        return max(allp, key=lambda p: p.score) if allp else None
+        return max(self.pool, key=lambda p: p.score) if self.pool else None
 
     def all_programs(self):
-        return [p for isl in self.islands for p in isl]
+        return list(self.pool)
 
-    def worst(self, n=2, exclude=()):
-        """The n lowest-scoring programs (for 'what did not work' examples)."""
-        ex = {id(p) for p in exclude}
-        pool = [p for p in self.all_programs() if id(p) not in ex]
-        return sorted(pool, key=lambda p: p.score)[:n]
-
-    def pick_island(self):
-        return self.rng.randrange(len(self.islands))
-
-    def sample_parents(self, island, k=2):
-        pop = self.islands[island]
-        if not pop:
-            return []
-        scores = np.array([p.score for p in pop], dtype=float)
-        w = np.exp((scores - scores.max()) / max(self.temperature, 1e-6))
-        w = w / w.sum()
-        k = min(k, len(pop))
-        idx = list(np.random.choice(len(pop), size=k, replace=False, p=w))
-        return sorted((pop[i] for i in idx), key=lambda p: p.score, reverse=True)
-
-    def reset_weak_islands(self, keep_fraction=0.5):
-        best_score = [(i, max((p.score for p in isl), default=-9.99))
-                      for i, isl in enumerate(self.islands)]
-        best_score.sort(key=lambda t: t[1])
-        n_reset = int(len(self.islands) * (1 - keep_fraction))
-        survivors = self.all_programs()
-        if not survivors:
+    def reset(self, keep_fraction=0.5):
+        """Purge stagnation: keep the top keep_fraction of the pool (champion always survives)."""
+        if len(self.pool) < 4:
             return
-        champ = max(survivors, key=lambda p: p.score)
-        for i, _ in best_score[:n_reset]:
-            self.islands[i] = [Program(champ.code, champ.score, champ.diagnostics, champ.space)]
+        self.pool.sort(key=lambda p: p.score, reverse=True)
+        self.pool = self.pool[:max(1, int(len(self.pool) * keep_fraction))]
 
 
 def _norm_code(code: str) -> str:
@@ -124,22 +100,59 @@ def _norm_code(code: str) -> str:
 
 
 class Evolver:
-    def __init__(self, data, splits, client, model=MODEL, n_islands=4, k_parents=2,
+    def __init__(self, data, splits, client, model=MODEL,
                  fit_budget=200, cost=0.0005, jobs=1, seed=0, log=print,
-                 objective="sharpe", min_sharpe=0.8):
+                 objective="sharpe", min_sharpe=0.8, vs_buyhold=True, theme=None,
+                 max_leverage=1.0, null_gate=True, null_gate_configs=64, null_gate_shifts=50,
+                 skill_gate=False, skill_pmax=0.10):
         self.data = data
         self.splits = splits
         self.client = client
         self.model = model
-        self.k_parents = k_parents
+        self.theme = theme          # investment-theme paragraph injected into the system prompt
+        # Position cap. clip_signal / run_backtest enforce it via the alpha_tools.MAX_LEVERAGE
+        # module global, so set it HERE from this one arg — otherwise the prompt (which reads
+        # self.max_leverage) and the backtest (which reads the global) could disagree. Single-run
+        # assumption: not safe for two Evolvers with different leverage in one process.
+        self.max_leverage = max_leverage
+        alpha_tools_module().MAX_LEVERAGE = float(max_leverage)
         self.fit_budget = fit_budget
         self.cost = cost
         self.objective = objective
         self.min_sharpe = min_sharpe
+        # vs_buyhold: score the ACTIVE return (strategy − buy-and-hold) everywhere, so the fitness
+        # is risk-adjusted OUTPERFORMANCE of buy-and-hold (a strategy that merely holds scores 0),
+        # and the skill test asks whether that outperformance is real vs a random re-timing of the
+        # same positions. Computed once for the pool; the benchmark return is params-independent.
+        self.vs_buyhold = vs_buyhold
+        self._bench = bt.buyhold_returns(self.data["close"], cost) if vs_buyhold else None
+        # per-candidate SELECTION-AWARE SHIFT-THE-SIGNAL skill p-value. Report-only by DEFAULT (does
+        # not filter selection) — but with skill_gate on it becomes a hard reject (see evaluate()).
+        # For every candidate we sample null_gate_configs configs of its structure, take the MAX
+        # in-sample score over them (the selection the search does), and compare it to that same max
+        # under a fixed set of random circular SHIFTS of the positions. Shifting keeps returns and
+        # each config's exposure profile exactly and destroys only the signal<->return alignment, so
+        # drift and exposure level cancel and only timing skill is tested. p = fraction of shifted
+        # maxima >= the real max. Shift offsets are fixed once (common random numbers) so the bar is
+        # a consistent comparison across candidates.
+        self.null_gate = null_gate
+        self.null_gate_configs = null_gate_configs
+        self.null_gate_shifts = null_gate_shifts
+        # skill_gate: hard-REJECT mutated candidates whose outperformance is not real timing skill
+        # (shift-the-signal p >= skill_pmax) so leverage/luck strategies can't breed or win.
+        self.skill_gate = skill_gate
+        self.skill_pmax = skill_pmax
+        self.n_skill_rejected = 0
+        self._last_skill_rejected = False
+        self.n_skill_significant = 0       # candidates with skill p < 0.05
+        self._last_skill_p = float("nan")  # most recent candidate's skill p-value (for logging)
+        self._shift_offsets = None
+        if null_gate:
+            self._shift_offsets = bt.make_shift_offsets(len(self.data), null_gate_shifts, seed)
         self.jobs = jobs
         self.seed_val = seed
         self.tools = alpha_tools_module()
-        self.db = ProgramDatabase(n_islands=n_islands, seed=seed)
+        self.db = ProgramDatabase(seed=seed)
         self.log = log
         self.n_evaluated = 0
         self.n_rejected = 0
@@ -148,19 +161,31 @@ class Evolver:
         self._sig_cache = {}     # default-param positions -> Program (behavioral dedup)
         self._last_cached = False
         self._last_code = ""     # raw code of the most recent child (for logging)
+        self._recent_rejects = []  # last few (reason, code) rejects, shown to the model as negatives
         self._n_steps = 0        # mutation counter (drives the periodic exploration turn)
         self._last_explore = False
         self.n_selfcorrected = 0 # rejects rescued by the LLM self-correct retry
         self._last_error = None  # error string of the most recent reject (fed to self-correct)
 
-    def evaluate(self, code):
-        """Compile, quick-check, then quarter-CCV score. None if invalid.
+    def _log_reject(self, reason, code):
+        """Print a rejected candidate and why, AND remember it as a negative example for the prompt
+        (so the model learns what a bad strategy looks like instead of re-proposing it)."""
+        self.log(f"    REJECT: {reason}")
+        body = "\n".join("      " + ln for ln in code.strip().splitlines())
+        self.log(f"    rejected code:\n{body}")
+        self._recent_rejects.append({"reason": reason, "code": code})
+        self._recent_rejects = self._recent_rejects[-8:]   # keep the most recent handful
+
+    def evaluate(self, code, gate=True):
+        """Compile, quick-check, then quarter-CCV score. None if invalid. gate=True applies the
+        skill gate (reject no-timing-skill mutations); seeds pass gate=False so they always plant.
 
         Deduplicated: a strategy whose normalized code — or whose positions at the
         default params — was already seen is returned from cache and NOT re-fit.
         self._last_cached flags such a cache hit (so step() won't re-add a clone)."""
         import pandas as pd
         self._last_cached = False
+        self._last_skill_p = float("nan")   # reset so a dup/reject row never logs a stale p
         self._last_error = None
         code = self._repair(code)                          # deterministic hygiene fixes
         self._last_code = code                             # log/self-correct see the repaired code
@@ -172,12 +197,12 @@ class Evolver:
         try:
             strat, space = compile_strategy(code)
             space = self._augment_space(code, space)       # declare any p["x"] used but missing
-            sig = strat(self.data, self.tools, P.midpoint(space))   # cheap validity check
-            if not isinstance(sig, pd.Series):
-                raise TypeError("strategy did not return a pandas Series")
+            sig = bt.as_position_series(strat(self.data, self.tools, P.midpoint(space)),
+                                        self.data.index)    # coerce Series/np.where-array; else raises
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
+            self._log_reject(self._last_error, code)
             self._code_cache[ckey] = None
             return None
         # behavioral duplicate: identical positions at default params == same strategy.
@@ -194,17 +219,68 @@ class Evolver:
         try:
             diag = bt.ccv_median_oos(strat, space, self.data, self.tools, self.splits,
                                      self.fit_budget, self.cost, self.jobs, self.seed_val,
-                                     objective=self.objective, min_sharpe=self.min_sharpe)
+                                     objective=self.objective, min_sharpe=self.min_sharpe,
+                                     benchmark_ret=self._bench)
         except Exception as e:
             self.n_rejected += 1
             self._last_error = f"{type(e).__name__}: {e}"
+            self._log_reject(self._last_error, code)
             self._code_cache[ckey] = None
             return None
         score = diag["median_oos"]
         if not np.isfinite(score):
             self.n_rejected += 1
+            self._log_reject("non-finite fitness (nan/inf)", code)
             self._code_cache[ckey] = None
             return None
+        # SKILL p-value — selection-aware shift-the-signal on the SAME active return, so it asks
+        # whether the OUTPERFORMANCE of buy-and-hold is real timing or just leverage/luck. With
+        # skill_gate on, a MUTATED candidate whose outperformance is NOT skill (p >= skill_pmax) is
+        # REJECTED so it can't breed or win. Seeds are exempt (gate=False) so the population always
+        # has a starting point. Computed before the risk profile so rejects skip that extra fit.
+        diag["skill_pvalue"] = float("nan")
+        self._last_skill_rejected = False
+        if self.null_gate:
+            try:
+                res = bt.shift_null_pvalue(strat, space, self.data, self.tools,
+                                           n_configs=self.null_gate_configs,
+                                           shift_offsets=self._shift_offsets,
+                                           cost=self.cost, seed=self.seed_val,
+                                           objective=self.objective, min_sharpe=self.min_sharpe,
+                                           benchmark_ret=self._bench)
+                diag["skill_pvalue"] = res["pvalue"]
+                self._last_skill_p = res["pvalue"]
+                if res["pvalue"] < 0.05:
+                    self.n_skill_significant += 1
+            except Exception as e:                      # diagnostic only: never block on an error
+                self.log(f"    skill p-value failed ({type(e).__name__}: {e})")
+            if (gate and self.skill_gate and np.isfinite(diag["skill_pvalue"])
+                    and diag["skill_pvalue"] >= self.skill_pmax):
+                self.n_skill_rejected += 1
+                self._last_skill_rejected = True
+                self._log_reject(f"scored {score:+.3f} (beat buy&hold) but NO TIMING SKILL "
+                                 f"(skill_p={diag['skill_pvalue']:.2f} >= {self.skill_pmax:g}): a "
+                                 f"random re-timing of its own positions does just as well, so the "
+                                 f"outperformance is leverage/luck, not skill — this exposure/tilt "
+                                 f"pattern is NOT specific to the price path", code)
+                self._code_cache[ckey] = None           # not a code error: no self-correct
+                return None
+        # RISK PROFILE for the PROMPT (survivors only) — so the model optimizes with drawdown /
+        # leverage IN VIEW. Fit once on the full pool, backtest, record max drawdown, MAR, exposure.
+        diag["maxdd"] = diag["mar"] = diag["avg_exposure"] = float("nan")
+        try:
+            pf = bt.fit_full(strat, space, self.data, self.tools, budget=self.fit_budget,
+                             cost=self.cost, seed=self.seed_val, objective=self.objective,
+                             min_sharpe=self.min_sharpe, benchmark_ret=self._bench)
+            sig_full = bt.as_position_series(strat(self.data, self.tools, pf), self.data.index)
+            rr = bt.run_backtest(sig_full, self.data, self.cost,
+                                 stop=pf.get("stop_loss", 0.0)).to_numpy()
+            diag["maxdd"] = bt._max_drawdown_arr(rr)
+            diag["mar"] = bt._mar_arr(rr)
+            lev = float(self.max_leverage)                  # clip to the REAL cap, not a magic 9
+            diag["avg_exposure"] = float(np.nanmean(sig_full.clip(-lev, lev).to_numpy()))
+        except Exception as e:                              # advisory metrics — log, don't crash
+            self.log(f"    risk profile failed ({type(e).__name__}: {e})")
         self.n_evaluated += 1
         prog = Program(code, float(score), diag, space)
         self._code_cache[ckey] = prog
@@ -213,21 +289,19 @@ class Evolver:
         return prog
 
     def seed(self, seed_codes):
-        """Plant seeds across the islands. Accepts a single code or a list of families;
-        each working family is cycled across islands so the search starts diverse."""
+        """Plant the seed families into the population. Accepts a single code or a list."""
         if isinstance(seed_codes, str):
             seed_codes = [seed_codes]
         progs = []
         for code in seed_codes:
-            pr = self.evaluate(code)
+            pr = self.evaluate(code, gate=False)       # seeds are exempt from the skill gate
             if pr is not None:
                 progs.append(pr)
                 self.log(f"seed {len(progs)}: median_oos={pr.score:+.3f}")
         if not progs:
             raise RuntimeError("no seed strategy evaluated — check the contract")
-        for i in range(len(self.db.islands)):
-            pr = progs[i % len(progs)]
-            self.db.add(i, Program(pr.code, pr.score, pr.diagnostics, pr.space))
+        for pr in progs:
+            self.db.add(Program(pr.code, pr.score, pr.diagnostics, pr.space))
 
     # ---- auto-repair: deterministically fix the common 7B hygiene failures ----------------
 
@@ -285,16 +359,15 @@ class Evolver:
         # Show the WHOLE history (every distinct strategy tried + its score), not just two
         # parents, so the model can see which structures win and avoid repeating them.
         history = [p.as_parent() for p in self.db.all_programs()]
-        user = prompt_mod.build_user_prompt(history, explore=explore)
+        user = prompt_mod.build_user_prompt(history, explore=explore, rejects=self._recent_rejects)
         # The client (Anthropic or OpenAI-compatible) handles provider specifics,
         # including dropping temperature on models that reject it.
-        text = self.client.mutate(prompt_mod.SYSTEM, user, model=self.model,
-                                  max_tokens=1500, temperature=1.0)
+        text = self.client.mutate(prompt_mod.system_prompt(self.theme, self.max_leverage),
+                                  user, model=self.model, max_tokens=1500, temperature=1.0)
         return extract_code(text)
 
     def step(self):
-        island = self.db.pick_island()
-        if not self.db.islands[island]:
+        if not self.db.all_programs():
             return None
         self._n_steps += 1
         self._last_explore = (self._n_steps % self.EXPLORE_EVERY == 0)
@@ -316,7 +389,7 @@ class Evolver:
         if child is not None and attempts > 0:
             self.n_selfcorrected += 1
         if child is not None and not self._last_cached:   # don't re-add a duplicate clone
-            self.db.add(island, child)
+            self.db.add(child)
         return child
 
     def run(self, iterations, reset_every=50, log_every=1):
@@ -329,15 +402,21 @@ class Evolver:
                 best_score = cur.score
                 self.log(f"[{it:4d}]   *** new best median_oos = {best_score:+.3f} ***")
             if it % reset_every == 0:
-                self.db.reset_weak_islands()
+                self.db.reset()
             if it % log_every == 0:
                 cs = ("dup" if self._last_cached else
                       (f"{child.score:+.3f}" if child else "REJECT"))
+                sh = (f" Sh={child.diagnostics.get('median_sharpe', float('nan')):+.2f}"
+                      if child is not None else "")
+                skp = (f" skill_p={self._last_skill_p:.2f}"
+                       if child is not None and np.isfinite(self._last_skill_p) else "")
                 tag = " EXPLORE" if self._last_explore else ""
-                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}  "
+                self.log(f"[{it:4d}]{tag} best={best_score:+.3f}  child={cs}{sh}{skp}  "
                          f"pop={len(self.db.all_programs())} rej={self.n_rejected} "
+                         f"skillrej={self.n_skill_rejected} sig={self.n_skill_significant} "
                          f"dup={self.n_dup} fixed={self.n_selfcorrected}")
-                if self._last_code:                       # show what the model actually wrote
+                # rejects already logged their code + reason in evaluate(); print accepted/dup here
+                if self._last_code and child is not None:
                     body = "\n".join("      " + ln for ln in self._last_code.strip().splitlines())
-                    self.log(f"    child code (score={cs}):\n{body}")
+                    self.log(f"    child code (score={cs}{skp}):\n{body}")
         return self.db.best()

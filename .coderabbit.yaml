@@ -1,0 +1,8 @@
+# CodeRabbit is disabled for this repository.
+# https://docs.coderabbit.ai/getting-started/configure-coderabbit
+reviews:
+  auto_review:
+    enabled: false
+  review_status: false
+chat:
+  auto_reply: false

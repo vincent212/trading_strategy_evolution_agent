@@ -83,6 +83,15 @@ def rolling_low(x: pd.Series, n: int) -> pd.Series:
     return x.rolling(int(n), min_periods=int(n)).min().shift(1)
 
 
+def drawdown(x: pd.Series, n: int) -> pd.Series:
+    """How far x is below its rolling n-bar peak, as a value in (-1, 0]: 0 = at a new high,
+    -0.20 = 20% below the recent peak. Causal (the peak includes the current bar, which is known).
+    The natural input for a trailing STOP-LOSS: cut/flatten exposure when drawdown < -threshold,
+    and lean back in as it recovers toward 0."""
+    peak = x.rolling(int(n), min_periods=1).max()
+    return (x / peak - 1.0).fillna(0.0)
+
+
 def breakout(x: pd.Series, n: int) -> pd.Series:
     """+1 on a new n-bar high, -1 on a new n-bar low, 0 otherwise."""
     hi = rolling_high(x, n)
@@ -132,14 +141,26 @@ def crossover(fast: pd.Series, slow: pd.Series) -> pd.Series:
                      np.where(sign.diff() < 0, -1.0, 0.0)), index=fast.index)
 
 
-def clip_signal(sig: pd.Series) -> pd.Series:
-    """Clean a raw signal into a valid position in [-1, 1]."""
-    return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+# Position cap (leverage). 1.0 = fully long/short only (default). run_search sets this per run;
+# clip_signal and the backtest both respect it, so a strategy can lever UP to MAX_LEVERAGE in
+# favorable regimes (the only way to beat buy-and-hold on total return, since B&H is 1.0 long).
+MAX_LEVERAGE = 1.0
+
+
+def clip_signal(sig) -> pd.Series:
+    """Clean a raw signal into a valid position in [-MAX_LEVERAGE, MAX_LEVERAGE].
+    Accepts a pandas Series OR a numpy array (e.g. the result of np.where, which drops the index);
+    an array is cleaned here and the backtest re-aligns it positionally to the price index."""
+    lev = float(MAX_LEVERAGE)
+    if isinstance(sig, pd.Series):
+        return sig.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-lev, lev)
+    arr = np.nan_to_num(np.asarray(sig, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(arr, -lev, lev)
 
 
 # Names exposed to the LLM in the prompt (see prompt.py).
 TOOL_NAMES = [
     "sma", "ema", "roc", "zscore", "rsi", "realized_vol", "vol_target_scale",
-    "rolling_high", "rolling_low", "breakout", "vol_regime",
+    "rolling_high", "rolling_low", "drawdown", "breakout", "vol_regime",
     "pctile_rank", "crossover", "clip_signal",
 ]

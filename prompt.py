@@ -1,6 +1,7 @@
 """
-Builds the mutation prompt: show the LLM two high-scoring parent strategies (each a
-trainable param_space() + strategy()) and ask for an improved, distinct child.
+Builds the mutation prompt: show the LLM the whole scored history of strategies tried (each a
+trainable param_space() + strategy()) and ask for an improved, distinct child that OUTPERFORMS
+buy-and-hold — merely holding the asset scores 0.
 """
 from __future__ import annotations
 import alpha_tools  # noqa: F401 (kept for parity / future tool listing)
@@ -10,6 +11,7 @@ sma(x, n) ema(x, n) roc(x, n) zscore(x, n)          -- trend / momentum
 rsi(x, n=14)                                         -- oscillator, 0..100
 realized_vol(x, n=20) vol_target_scale(x, target_vol, n, max_leverage)
 rolling_high(x, n) rolling_low(x, n) breakout(x, n)  -- breakout / range
+drawdown(x, n)                                       -- % below the rolling n-bar peak (0..-1): drawdown state for timing
 vol_regime(x, n=20, low=-0.5, high=0.5)              -- vol regime by z-score (low/high are z cutoffs): +1 low / -1 high
 pctile_rank(x, n)                                    -- rolling percentile rank, 0..1
 crossover(fast, slow) clip_signal(sig)               -- helpers"""
@@ -17,14 +19,18 @@ crossover(fast, slow) clip_signal(sig)               -- helpers"""
 SYSTEM = f"""You are a quantitative researcher evolving TRAINABLE trading strategies for a \
 single stock or ETF. The traded asset is data['close'].
 
-YOUR GOAL is to EVOLVE strategies that score higher. Each strategy is scored by its \
-median out-of-sample Sharpe across many cross-validation splits (higher is better); its \
-parameters are fit automatically before scoring, so you design only the FORM. You are shown \
-the strategies tried so far with their scores; produce a CHILD that BEATS the best of them -- \
-keep the mechanisms that scored well, drop the ones that scored poorly, and recombine them in \
-a NEW nonlinear way. The child must be a genuine variation (not a copy of one already tried) \
-and should generalize -- score well on data it was NOT fit to -- not merely fit the past. The \
-edge comes from HOW you combine the tools (see rule 2), not from any single indicator.
+YOUR GOAL is to EVOLVE strategies that OUTPERFORM BUY-AND-HOLD. Each strategy is scored by how \
+much it beats buy-and-hold, risk-adjusted, out-of-sample: the median across cross-validation \
+splits of the Sharpe of its ACTIVE return (strategy minus a constant fully-long position). \
+CRUCIAL: simply being long the stock scores ZERO — you are NOT rewarded for exposure or for the \
+stock going up. You earn ONLY by TIMING your exposure better than passively holding: be more \
+invested before good stretches and less before bad ones (step aside or short in drawdowns, lean \
+in during favorable regimes). A strategy that is always long, or long whenever a trend is up, \
+scores ~0. Parameters are fit automatically, so you design only the FORM. You are shown the \
+strategies tried so far with their scores; produce a CHILD that BEATS the best of them -- keep \
+the mechanisms that scored well, drop the ones that scored poorly, and recombine them in a NEW \
+nonlinear way. The child must generalize (score well on data it was NOT fit to), not just fit the \
+past. The edge comes from HOW you TIME exposure by combining the tools (see rule 2).
 
 Each strategy is EXACTLY two functions, with these exact signatures:
 
@@ -90,14 +96,72 @@ keep what worked, and make a real structural change (a regime switch or threshol
 repeat a structure already listed. Output ONLY one ```python code block with BOTH functions. No prose."""
 
 
+DEFAULT_THEME = """INVESTMENT THEME — design your strategies in this spirit (this is HOW good \
+single-stock strategies look; build realistic, tradeable structures like these, not exotic ones):
+- The base case for a single stock is being LONG — it drifts up over time, so most of the time you \
+should be invested. Your edge is TIMING that exposure around the base case, not avoiding it.
+- ADD / lean in on DIPS, especially when volatility is LOW — calm pullbacks inside an uptrend tend \
+to resolve upward, so a low-vol dip is a good place to be MORE exposed.
+- REDUCE or hedge exposure when volatility is HIGH or a downtrend / drawdown regime sets in. \
+Cutting risk before bad stretches is the main way a long-biased strategy BEATS buy-and-hold.
+- Only go fully FLAT or SHORT on strong evidence (a confirmed high-vol / bearish regime) — time out \
+of the market costs you the drift, so be out only when it really matters.
+- If LEVERAGE is available (positions may exceed 1.0), concentrate it: lever UP toward the max only \
+in your highest-conviction calm uptrends, and cut hard in stress. Beating buy-and-hold on total \
+RETURN means amplifying the good regimes, not being uniformly levered.
+- You may add an INTRADAY STOP-LOSS, and let the optimizer tune it: declare a param named exactly \
+`stop_loss` (e.g. ("float", 0.0, 0.05)). The BACKTEST applies it (on any day, if price falls that \
+fraction below the OPEN intraday you exit there with slippage; overnight gaps are NOT stopped); \
+0 = no stop. Do NOT read p["stop_loss"] inside strategy() — the backtest handles it; just declare \
+it. A stop caps daily downside (can raise MAR) but whipsaws if too tight, so declaring it and \
+letting the optimizer pick the level (including ~0 = off) is better than a hard-coded stop. You can \
+also use tools.drawdown(close, n) — how far below the recent peak you are — to TIME entries/leverage.
+Because the score is OUTPERFORMANCE of buy-and-hold, you are paid for the risk you CUT in bad \
+regimes and the extra (or levered) exposure you ADD at good entries — never for merely being long."""
+
+
+def load_theme(path: str | None = None) -> str:
+    """Load the investment-theme paragraph injected into the system prompt. Reads `path`, else
+    $STRATEGY_THEME_FILE, else a `theme.txt` next to this module, else the built-in DEFAULT_THEME.
+    Editing that file swaps the theme with no code change."""
+    import os
+    p = path or os.environ.get("STRATEGY_THEME_FILE") \
+        or os.path.join(os.path.dirname(__file__), "theme.txt")
+    try:
+        with open(p) as f:
+            txt = f.read().strip()
+            return txt or DEFAULT_THEME
+    except OSError:
+        return DEFAULT_THEME
+
+
+def system_prompt(theme: str | None = None, max_leverage: float = 1.0) -> str:
+    """The SYSTEM message with the investment theme (and a leverage note when max_leverage>1)
+    injected before the RULES. theme=None -> the default/loaded theme; theme='' -> no theme."""
+    theme = DEFAULT_THEME if theme is None else theme
+    block = (theme.strip() + "\n\n") if theme and theme.strip() else ""
+    if max_leverage and max_leverage > 1.0:
+        block += (
+            f"LEVERAGE IS AVAILABLE — positions may exceed fully-long: clip_signal allows up to "
+            f"±{max_leverage:g}. Buy-and-hold is exactly 1.0, so the ONLY way to beat it on RETURN "
+            f"is to be MORE than 1.0 long (up to {max_leverage:g}) in the best regimes and LESS "
+            f"(trim, cash, or short) in the worst. Return a sig >1.0 to lever up — e.g. "
+            f"`sig = 1.0 + boost*calm_uptrend - cut*high_vol` so exposure rises toward {max_leverage:g} "
+            f"in calm uptrends and falls in stress. Leverage adds volatility (lower Sharpe) but that "
+            f"is the accepted trade for beating buy-and-hold on total return.\n\n")
+    return SYSTEM.replace("RULES — every one is mandatory",
+                          block + "RULES — every one is mandatory", 1)
+
+
 def _norm(code: str) -> str:
     return "\n".join(ln.rstrip() for ln in code.strip().splitlines() if ln.strip())
 
 
-def build_user_prompt(history: list[dict], explore: bool = False) -> str:
-    """history: EVERY strategy tried so far, each {code, score, diagnostics}. We show the whole
-    landscape (best first, deduplicated) with each one's median OOS Sharpe, so the model can see
-    which STRUCTURES worked and which did not — and avoid re-proposing ones already tried.
+def build_user_prompt(history: list[dict], explore: bool = False, rejects=None) -> str:
+    """history: EVERY surviving strategy, each {code, score, diagnostics}, best first. rejects: the
+    last few THROWN-OUT candidates, each {reason, code} — shown as negative examples so the model
+    learns what fails (invalid code, or beat buy-and-hold but no real timing skill) instead of
+    re-proposing it and getting stuck.
 
     explore=True turns this into an EXPLORATION turn: ignore the scores, take a random jump to a
     structure unlike anything tried (to escape local optima)."""
@@ -110,17 +174,41 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
         rows.append(p)
     MAX = 24                                       # bound context: top 16 + worst 8
     shown = rows if len(rows) <= MAX else rows[:16] + rows[-8:]
-    parts = ["HISTORY — every distinct strategy tried so far and its median OOS Sharpe "
-             "(higher is better), best first. Learn which STRUCTURES win:"]
+    parts = [
+        "HISTORY — every distinct strategy tried so far, best first. READ THE SCORE — it is the ONLY\n"
+        "thing you maximize:\n"
+        "  `score` = how much you BEAT BUY-AND-HOLD, risk-adjusted (the Sharpe of your return MINUS\n"
+        "            buy-and-hold's return — the information ratio).\n"
+        "  score = 0.00  ->  EXACTLY buy-and-hold (the bar you must clear)\n"
+        "  score > 0     ->  you BEAT just holding the stock (higher = better) — THIS is the goal\n"
+        "  score < 0     ->  you did WORSE than just holding — BAD, even if the strategy makes money.\n"
+        "Being long/levered and making money is NOT enough: buy-and-hold already makes money, so you\n"
+        "only win by beating it (score > 0). The other columns are the RISK behind the score:\n"
+        "  Sharpe = the same info ratio;  MAR = return per unit of worst drawdown (HIGHER = safer;\n"
+        "  leverage inflates return AND drawdown, so a high score with low MAR is fragile);\n"
+        "  maxDD = worst peak-to-trough;  avg_lev = average exposure (1.0 = fully long).\n"
+        "Prefer high score AND high MAR. Learn which STRUCTURES clear 0 (beat holding) and which don't:"]
     for p in shown:
         d = p.get("diagnostics", {})
-        parts.append(f"# median_oos={d.get('median_oos', float('nan')):+.3f}  "
-                     f"positive_splits={d.get('frac_positive', float('nan')):.0%}  "
-                     f"consistency_std={d.get('std_oos', float('nan')):.2f}\n{p['code'].strip()}")
+        parts.append(
+            f"# score={d.get('median_oos', float('nan')):+.3f}  "
+            f"excess_ret={d.get('median_return', float('nan')):+.0%}  "
+            f"Sharpe={d.get('median_sharpe', float('nan')):+.2f}  "
+            f"MAR={d.get('mar', float('nan')):.2f}  "
+            f"maxDD=-{d.get('maxdd', float('nan')):.0%}  "
+            f"avg_lev={d.get('avg_exposure', float('nan')):.2f}x  "
+            f"pos_splits={d.get('frac_positive', float('nan')):.0%}\n{p['code'].strip()}")
     if len(rows) > MAX:
         parts.append(f"# (+{len(rows) - MAX} more tried, scoring in between — not shown)")
     best = rows[0].get("score", float("nan")) if rows else float("nan")
     joined = "\n\n".join(parts)
+    if rejects:
+        rparts = ["REJECTED — these were tried and THROWN OUT for the stated reason; they are NOT in "
+                  "the history above and CANNOT be used. Study them to learn what a BAD strategy "
+                  "looks like, and do NOT propose these or minor variants of them:"]
+        for r in rejects[-6:]:
+            rparts.append(f"# REJECTED: {r.get('reason', '').strip()}\n{r.get('code', '').strip()}")
+        joined = joined + "\n\n" + "\n\n".join(rparts)
     if explore:
         return (f"{joined}\n\n"
                 f"EXPLORATION TURN — ignore the scores above. Take a RANDOM JUMP: propose a "
@@ -129,8 +217,16 @@ def build_user_prompt(history: list[dict], explore: bool = False) -> str:
                 f"oscillator cross switched by vol regime, a rank-based signal). A wild, untried "
                 f"idea is the whole point, even if it scores worse. Do NOT copy any structure "
                 f"above. Return only the ```python code block.")
+    bar_note = (f"NOTHING has beaten buy-and-hold yet (best {best:+.3f} is still <= 0 — every "
+                f"strategy so far LOST to just holding). Your #1 job: get score ABOVE 0."
+                if best <= 0 else
+                f"The best is {best:+.3f} (it beats buy-and-hold). Beat it — push score higher.")
     return (f"{joined}\n\n"
-            f"The best so far is {best:+.3f}. The top entries are mostly flat linear blends that "
-            f"have plateaued — to beat them, change the STRUCTURE (add a nonlinear regime switch "
-            f"or threshold gate per rule 2), and do not repeat one already listed. Return only the "
-            f"```python code block.")
+            f"{bar_note} score > 0 means you beat holding the stock risk-adjusted; score <= 0 means "
+            f"you did NOT. Beat the bar by TIMING exposure better — change the STRUCTURE (a nonlinear "
+            f"regime switch or threshold gate per rule 2) so you are OUT/SHORT/light during bad "
+            f"stretches and heavy during good ones. Being always-long, or long-whenever-a-trend-is-up, "
+            f"scores ~0 (that IS buy-and-hold) — the score only rewards being right about WHEN. Prefer "
+            f"HIGH MAR too: a score bought with reckless leverage (huge maxDD) is fragile — concentrate "
+            f"leverage in the calmest, highest-conviction regimes and cut it in stress. Do not repeat "
+            f"a structure already listed. Return only the ```python code block.")
