@@ -174,13 +174,20 @@ def build_user_prompt(history: list[dict], explore: bool = False, rejects=None) 
         rows.append(p)
     MAX = 24                                       # bound context: top 16 + worst 8
     shown = rows if len(rows) <= MAX else rows[:16] + rows[-8:]
-    parts = ["HISTORY — every distinct strategy tried so far, best first. `score` is OUTPERFORMANCE "
-             "of buy-and-hold (0 = no better than just holding; higher is better) — that is what you "
-             "maximize. The other numbers show the RISK behind the score so you don't chase return "
-             "with reckless leverage: Sharpe = risk-adjusted excess (info ratio), MAR = return per "
-             "unit of worst drawdown (HIGHER is safer; leverage inflates return AND drawdown so a "
-             "high score with low MAR is fragile), maxDD = worst peak-to-trough, avg_lev = average "
-             "exposure (1.0 = fully long). Prefer structures with high score AND high MAR:"]
+    parts = [
+        "HISTORY — every distinct strategy tried so far, best first. READ THE SCORE — it is the ONLY\n"
+        "thing you maximize:\n"
+        "  `score` = how much you BEAT BUY-AND-HOLD, risk-adjusted (the Sharpe of your return MINUS\n"
+        "            buy-and-hold's return — the information ratio).\n"
+        "  score = 0.00  ->  EXACTLY buy-and-hold (the bar you must clear)\n"
+        "  score > 0     ->  you BEAT just holding the stock (higher = better) — THIS is the goal\n"
+        "  score < 0     ->  you did WORSE than just holding — BAD, even if the strategy makes money.\n"
+        "Being long/levered and making money is NOT enough: buy-and-hold already makes money, so you\n"
+        "only win by beating it (score > 0). The other columns are the RISK behind the score:\n"
+        "  Sharpe = the same info ratio;  MAR = return per unit of worst drawdown (HIGHER = safer;\n"
+        "  leverage inflates return AND drawdown, so a high score with low MAR is fragile);\n"
+        "  maxDD = worst peak-to-trough;  avg_lev = average exposure (1.0 = fully long).\n"
+        "Prefer high score AND high MAR. Learn which STRUCTURES clear 0 (beat holding) and which don't:"]
     for p in shown:
         d = p.get("diagnostics", {})
         parts.append(
@@ -210,12 +217,16 @@ def build_user_prompt(history: list[dict], explore: bool = False, rejects=None) 
                 f"oscillator cross switched by vol regime, a rank-based signal). A wild, untried "
                 f"idea is the whole point, even if it scores worse. Do NOT copy any structure "
                 f"above. Return only the ```python code block.")
+    bar_note = (f"NOTHING has beaten buy-and-hold yet (best {best:+.3f} is still <= 0 — every "
+                f"strategy so far LOST to just holding). Your #1 job: get score ABOVE 0."
+                if best <= 0 else
+                f"The best is {best:+.3f} (it beats buy-and-hold). Beat it — push score higher.")
     return (f"{joined}\n\n"
-            f"The best so far is {best:+.3f} (outperformance of buy-and-hold; 0 = no better than "
-            f"holding). Beat it by TIMING exposure better — change the STRUCTURE (a nonlinear regime "
-            f"switch or threshold gate per rule 2) so you are OUT or SHORT during bad stretches and "
-            f"invested during good ones. Remember: always-long, or long-whenever-a-trend-is-up, "
-            f"scores ~0 — the score only rewards being right about WHEN. And prefer a HIGH MAR: a big "
-            f"score bought with reckless leverage (huge maxDD, low MAR) is fragile — concentrate any "
+            f"{bar_note} score > 0 means you beat holding the stock risk-adjusted; score <= 0 means "
+            f"you did NOT. Beat the bar by TIMING exposure better — change the STRUCTURE (a nonlinear "
+            f"regime switch or threshold gate per rule 2) so you are OUT/SHORT/light during bad "
+            f"stretches and heavy during good ones. Being always-long, or long-whenever-a-trend-is-up, "
+            f"scores ~0 (that IS buy-and-hold) — the score only rewards being right about WHEN. Prefer "
+            f"HIGH MAR too: a score bought with reckless leverage (huge maxDD) is fragile — concentrate "
             f"leverage in the calmest, highest-conviction regimes and cut it in stress. Do not repeat "
             f"a structure already listed. Return only the ```python code block.")
