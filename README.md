@@ -1,6 +1,6 @@
-# Trading Strategy Evolution Agent
+# LLM-Assisted Trading Strategy Search (LATSS)
 
-An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fits the parameters; a cross-validation + null-test framework decides whether any of it survives out of sample. It's a FunSearch-style evolutionary search adapted to noisy financial data — the model does structural search, not the trading.
+**LATSS** places an LLM inside an evolutionary loop: it proposes and mutates trading-strategy **code**, a numerical optimizer fits the parameters, and a cross-validation + null-test framework decides whether any of it survives out of sample. It's a FunSearch-style search adapted to noisy financial data, with the LLM handling structural invention and the surrounding machinery doing the fitting, backtesting, and judging.
 
 **📄 Full write-up:** [Why LLMs Can't Trade — and How to Use Them in Trading](https://vincentmayeski.substack.com/p/why-llms-cant-trade-and-how-to-use)
 
