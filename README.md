@@ -105,7 +105,6 @@ An earlier version of this run used the default **75/25** quarter split (fit on 
 | `llm.py` | provider shim: Ollama / OpenAI-compatible / Anthropic / Claude Code subagent |
 | `data.py` | Yahoo Finance price data (any ticker), cached to disk |
 | `params.py` | encodes `param_space()` into the optimizer's search box |
-| `make_diagrams.py`, `make_tables.py` | regenerate the figures in `assets/` |
 | `examples/nvda_worked_example.py` | reproduce the worked-example tables (in-sample + sealed holdout vs buy-and-hold) |
 
 ## Notes
