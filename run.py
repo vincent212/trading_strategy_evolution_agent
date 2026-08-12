@@ -39,7 +39,7 @@ def _make_logger(out_dir, tag):
 
 def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
                model="claude-haiku-4-5", cost=0.0005,
-               n_splits=100, fit_budget=200, champion_budget=400,
+               n_splits=100, train_frac=0.75, fit_budget=200, champion_budget=400,
                holdout_year=2026, reset_every=50, jobs=1, seed=0,
                objective="sharpe", min_sharpe=0.8, vs_buyhold=True, max_leverage=1.0,
                stop_slippage=0.001, theme_file=None,
@@ -72,7 +72,9 @@ def run_search(*, ticker="NVDA", start="2017-01-01", end=None, iterations=300,
     log(f"{ticker}: pool {pool.index[0].date()}..{pool.index[-1].date()} ({len(pool)} rows) | "
         f"holdout {holdout_year}: {len(hold)} rows")
 
-    splits = bt.make_quarter_splits(pool.index, n_splits=n_splits, train_frac=0.75, seed=seed)
+    splits = bt.make_quarter_splits(pool.index, n_splits=n_splits, train_frac=train_frac, seed=seed)
+    log(f"CV: {n_splits} random quarter splits, fit {train_frac:.0%} / test {1-train_frac:.0%} "
+        f"(NOTE: same-regime resampling — measures within-era generalization, not regime shift)")
 
     log(f"objective: {objective}" + (f" (min Sharpe {min_sharpe})" if objective == "return" else "")
         + (f"  |  fitness = risk-adjusted OUTPERFORMANCE of buy-and-hold (active return)"
@@ -283,6 +285,8 @@ def main():
     ap.add_argument("--model", default="claude-haiku-4-5")
     ap.add_argument("--cost", type=float, default=0.0005)
     ap.add_argument("--splits", type=int, default=100)
+    ap.add_argument("--train-frac", type=float, default=0.75,
+                    help="fraction of quarters used to fit each CV split (0.5 = 50/50 fit/test)")
     ap.add_argument("--fit-budget", type=int, default=200)
     ap.add_argument("--champion-budget", type=int, default=400)
     ap.add_argument("--holdout-year", type=int, default=2026)
@@ -316,7 +320,8 @@ def main():
     a = ap.parse_args()
     run_search(ticker=a.ticker, start=a.start, end=a.end, iterations=a.iterations,
                model=a.model, cost=a.cost,
-               n_splits=a.splits, fit_budget=a.fit_budget, champion_budget=a.champion_budget,
+               n_splits=a.splits, train_frac=a.train_frac,
+               fit_budget=a.fit_budget, champion_budget=a.champion_budget,
                holdout_year=a.holdout_year,
                reset_every=a.reset_every, jobs=a.jobs, seed=a.seed,
                objective=a.objective, min_sharpe=a.min_sharpe, vs_buyhold=a.vs_buyhold,
