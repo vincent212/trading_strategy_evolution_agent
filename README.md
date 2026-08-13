@@ -1,8 +1,8 @@
-# Trading Strategy Evolution Agent
+# LLM-Assisted Trading Strategy Search (LATSS)
 
-An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fits the parameters; a cross-validation + null-test framework decides whether any of it survives out of sample. It's a FunSearch-style evolutionary search adapted to noisy financial data — the model does structural search, not the trading.
+**LATSS** places an LLM inside an evolutionary loop: it proposes and mutates trading-strategy **code**, a numerical optimizer fits the parameters, and a cross-validation + null-test framework decides whether any of it survives out of sample. It's a FunSearch-style search adapted to noisy financial data, with the LLM handling structural invention and the surrounding machinery doing the fitting, backtesting, and judging.
 
-**📄 Full write-up:** [Why LLMs Can't Trade — and How to Use Them in Trading](https://vincentmayeski.substack.com/p/why-llms-cant-trade-and-how-to-use)
+**📄 Full write-up:** [LLM-Assisted Trading Strategy Search](https://vincentmayeski.substack.com/p/llm-assisted-trading-strategy-search)
 
 ![search loop](assets/01_loop.png)
 
@@ -14,7 +14,7 @@ An LLM proposes and mutates trading-strategy **code**; a numerical optimizer fit
 - The objective is switchable: Sharpe, or return under a Sharpe floor; and with leverage enabled, strategies can lever up to beat buy-and-hold on return. A single population with a periodic cull replaces the old islands (the mutation prompt uses the whole scored history; see PIPELINE.md §11).
 - The mutation model is pluggable: a local open model (Ollama), any OpenAI-compatible endpoint, the Anthropic API, or a Claude Code subagent.
 
-The [article](https://vincentmayeski.substack.com/p/why-llms-cant-trade-and-how-to-use) covers the method in full, a worked NVDA example (including where it fails out of sample), and how it relates to FunSearch, AlgoEvolve, and MadEvolve.
+The [article](https://vincentmayeski.substack.com/p/llm-assisted-trading-strategy-search) covers the method in full, a worked NVDA example, and how it relates to FunSearch, AlphaEvolve, MadEvolve, and QuantEvolve.
 
 ## Quick start
 

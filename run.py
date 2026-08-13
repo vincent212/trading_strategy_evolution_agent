@@ -25,7 +25,7 @@ from strategy_seed import SEEDS
 def _make_logger(out_dir, tag):
     """Logger that writes to stdout AND out_dir/<tag>_progress.log, flushing every
     record so progress is visible live even when the run is backgrounded."""
-    logger = logging.getLogger(f"funsearch.{tag}")
+    logger = logging.getLogger(f"latss.{tag}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
