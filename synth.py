@@ -44,6 +44,7 @@ def make_features(panel: pd.DataFrame, predictor: bool = False, target: str = "G
     rho = signal-to-noise of the injected predictor; mag = magnitude that makes the
     target's predictor dominate the cross-sectional argmax (so selection concentrates
     on the target). Both are calibrated (see __main__) for Sharpe ~1 + concentration."""
+    rho = float(min(max(rho, 0.0), 1.0))                  # SNR in [0,1]; rho>1 -> sqrt(1-rho^2) NaN kills the signal
     idx = panel.index
     cols = list(panel.columns)
     T, N = len(idx), len(cols)
@@ -70,9 +71,8 @@ def make_features(panel: pd.DataFrame, predictor: bool = False, target: str = "G
 
 
 if __name__ == "__main__":
-    # calibrate the positive control: find (rho, mag) giving GOOGL concentration + Sharpe ~1
+    # calibrate the positive control: sweep (base, rho) for GOOGL concentration + active Sharpe
     import data_mag7, backtest as bt, backtest_xs as xs
-    from collections import Counter
     panel = data_mag7.get_panel(); rets = xs._returns_matrix(panel); idx = panel.index
     cols = list(panel.columns); tgt = cols.index("GOOGL")
     bh = xs.portfolio_returns(np.tile(np.eye(len(cols))[tgt], (len(idx), 1)), rets, 0.0005)

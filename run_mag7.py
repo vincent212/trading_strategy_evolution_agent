@@ -7,14 +7,14 @@ The evolved unit is a NAME-SYMMETRIC per-series scorer:
     score(series, tools, p) -> pd.Series of per-bar scores for ONE price series
 
 Each bar the harness holds the single highest-scoring name (argmax -> one-hot).
-The LLM never sees ticker identity, so it designs a technical selection RULE, not a
-name pick. Fitness = CV median-OOS active Sharpe vs the equal-weight benchmark; the
-champion is measured once on a sealed holdout, against equal-weight AND a
-random-picker null.
+Fitness = CV median-OOS active Sharpe vs the equal-weight benchmark. There is NO
+hold-out: all data is in-sample. Skill is judged after the search against three
+in-sample bars — VC, empirical Rademacher, and Deflated Sharpe (see
+latss_paper_frame.md); the invalid shift-the-signal test has been removed.
 
-CLI:  python run_mag7.py --iterations 200 --holdout-year 2024
-Reuses: llm.py (client), backtest.py (CV splits, scalar objective, shift offsets),
-backtest_xs.py (cross-sectional evaluator), params.py (DE encode/decode).
+CLI:  python run_mag7.py --iterations 200 --cv-method purged
+Reuses: llm.py (client), backtest.py (CV splitters), backtest_xs.py (cross-sectional
+evaluator + skill bars), params.py (DE encode/decode).
 """
 from __future__ import annotations
 import os
@@ -412,8 +412,13 @@ def run(tickers=data_mag7.MAG7, start="2015-01-01", iterations=200, model="claud
                              [d["median_oos"] / (bt.PERIODS_PER_YEAR ** 0.5) for d in pop],
                              n_trials=len(pop))
     cv = float(best["median_oos"])
-    H = (cv ** 2 / radem["bar_q"] ** 2) if radem["bar_q"] > 1e-9 else float("inf")
-    clears = (cv > radem["bar_q"]) and (cv < vc if np.isfinite(vc) else True)
+    if cv <= 0:
+        H = 0.0                                        # a non-positive CV never clears
+    elif radem["bar_q"] > 1e-9:
+        H = cv ** 2 / radem["bar_q"] ** 2
+    else:
+        H = float("inf")                               # positive CV over a non-positive noise bar
+    clears = cv > radem["bar_q"]                        # clears the empirical Rademacher bar (VC is a separate ceiling)
 
     top3 = sorted(pop, key=lambda d: d["median_oos"], reverse=True)[:3]
     report = {

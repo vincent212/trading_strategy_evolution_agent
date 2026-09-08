@@ -262,9 +262,13 @@ def rademacher_bar(candidates, panel, rets, tools, splits, bench_ret, n_scramble
                 pass
         bars.append(best)
     bars = np.array(bars, dtype=float)
+    bars = bars[np.isfinite(bars)]                           # drop scrambles where every candidate threw
+    if bars.size == 0:
+        return {"bar_mean": float("nan"), "bar_q": float("nan"), "bar_max": float("nan"),
+                "quantile": quantile, "n_scramble": 0}
     q = float(np.quantile(bars, quantile))
     return {"bar_mean": float(bars.mean()), "bar_q": q, "bar_max": float(bars.max()),
-            "quantile": quantile, "n_scramble": int(n_scramble)}
+            "quantile": quantile, "n_scramble": int(bars.size)}
 
 
 # ---- VC (Vapnik) worst-case bar and Deflated Sharpe — reported alongside Rademacher ----
@@ -278,9 +282,9 @@ def vc_bar(vc_dim, n_obs, years, periods_per_year=PERIODS_PER_YEAR):
     search) — the rigorous statement that no capacity bar defends such a class. A linear
     model on d features has h ≈ d+1; a single-feature pick has h ≈ (n_features)+1."""
     h = float(vc_dim)
-    if not np.isfinite(h) or h <= 0:
-        return float("inf")
     m = float(n_obs)
+    if not np.isfinite(h) or h <= 0 or h >= m:               # unbounded / invalid / class can shatter the data
+        return float("inf")
     return float(np.sqrt(2.0 * h * np.log(np.e * m / h) / float(years)))
 
 
@@ -303,7 +307,7 @@ def deflated_sharpe(champ_ret, candidate_sharpes, n_trials=None):
     sr = r.mean() / r.std()                                   # PER-OBSERVATION Sharpe (not annualized)
     g3 = float(_skew(r)); g4 = float(_kurt(r, fisher=False))  # skew, (non-excess) kurtosis
     cand = np.asarray(candidate_sharpes, dtype=float); cand = cand[np.isfinite(cand)]
-    N = int(n_trials) if n_trials else max(2, cand.size)
+    N = max(2, int(n_trials) if n_trials else cand.size)     # N=1 -> Phi^-1(0)=-inf -> spurious DSR=1
     sr_std = float(cand.std()) if cand.size > 1 else abs(sr)  # dispersion of trial Sharpes
     gamma = 0.5772156649015329                                # Euler–Mascheroni
     sr0 = sr_std * ((1 - gamma) * norm.ppf(1 - 1.0 / N) + gamma * norm.ppf(1 - 1.0 / (N * np.e)))
