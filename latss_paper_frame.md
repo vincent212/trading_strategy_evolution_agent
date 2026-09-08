@@ -1,4 +1,8 @@
-# LATSS paper frame — validating the loop, and why overfitting forces simplicity
+# Overfitting is unpreventable and all data is in-sample ⇒ the quant must impose a priori simplicity
+
+*(working title)*
+
+## LATSS paper frame — validating the loop, and why overfitting forces simplicity
 
 Working frame for the LATSS article. This reframes the paper away from "we found a
 strategy" (we didn't; on real tools LATSS just overfits) toward a **framework
