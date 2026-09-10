@@ -2,13 +2,12 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-HEAD='#2c6fbf'; HTXT='white'; ALT='#f2f6fc'; EDGE='#c9d6e8'
+BG='#0e1116'; HEAD='#1f6feb'; HTXT='white'; TXT='#e6edf3'; ROW1='#161b22'; ROW2='#0d1117'; EDGE='#30363d'
 
-def render(fname, cols, rows, colw, fs=12, title=None):
+def render(fname, cols, rows, colw, fs=12):
     n=len(rows)
-    fig, ax = plt.subplots(figsize=(sum(colw), 0.55*(n+1)+ (0.5 if title else 0)))
-    ax.axis('off')
-    if title: ax.set_title(title, fontsize=13, fontweight='bold', color='#14304f', pad=10)
+    fig, ax = plt.subplots(figsize=(sum(colw), 0.55*(n+1)))
+    fig.patch.set_facecolor(BG); ax.set_facecolor(BG); ax.axis('off')
     t = ax.table(cellText=rows, colLabels=cols, cellLoc='center', loc='center',
                  colWidths=[w/sum(colw) for w in colw])
     t.auto_set_font_size(False); t.set_fontsize(fs); t.scale(1, 1.6)
@@ -17,11 +16,10 @@ def render(fname, cols, rows, colw, fs=12, title=None):
         if r==0:
             cell.set_facecolor(HEAD); cell.set_text_props(color=HTXT, fontweight='bold')
         else:
-            cell.set_facecolor('white' if r%2 else ALT)
-    fig.savefig(fname, dpi=200, bbox_inches='tight', facecolor='white'); plt.close(fig)
+            cell.set_facecolor(ROW2 if r%2 else ROW1); cell.set_text_props(color=TXT)
+    fig.savefig(fname, dpi=200, bbox_inches='tight', facecolor=BG); plt.close(fig)
     print("saved", fname)
 
-# 1. rho calibration
 render('table_calibration.png',
   ['ρ','SNR = ρ/√(1−ρ²)','oracle active Sharpe'],
   [['0.0','0.00','−0.67'],['0.1','0.10','0.00'],['0.2','0.20','+0.66'],['0.3','0.31','+1.23'],
@@ -29,7 +27,6 @@ render('table_calibration.png',
    ['0.8','1.33','+3.24'],['0.9','2.07','+3.62'],['1.0','∞','+3.92']],
   colw=[1.2,2.6,3.0])
 
-# 2. Exp1 results
 render('table_exp1.png',
   ['run','champion CV','Rademacher bar','cleared'],
   [['1','+0.500','+0.495','no  (tie, +0.005 — within bar noise)'],
@@ -37,7 +34,6 @@ render('table_exp1.png',
    ['3','−0.000','+0.621','no']],
   colw=[1.0,2.2,2.6,5.2])
 
-# 3. Exp2 results
 render('table_exp2.png',
   ['ρ','~Sharpe','runs cleared','champion CV (per run)','bar range'],
   [['0.05','−0.4','0/1','+0.52','0.56'],
