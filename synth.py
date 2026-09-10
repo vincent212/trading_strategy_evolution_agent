@@ -53,19 +53,15 @@ def make_features(panel: pd.DataFrame, predictor: bool = False, target: str = "G
         noise = _ar1_noise(T, N, seed * 100 + i)
         df = pd.DataFrame(noise, index=idx, columns=cols)
         if predictor and fname == PREDICTOR_SLOT:
-            # ORACLE (look-ahead by design): the target's forward EXCESS return over the universe —
-            # i.e. how much GOOGL will out/under-perform the equal-weight basket. This is what a
-            # selector must predict to BEAT equal-weight (predicting absolute return can't, since a
-            # single name doesn't beat a diversified basket risk-adjusted).
+            # Cross-sectional predictor: for EVERY name, a noisy view of that name's
+            # forward EXCESS return over the equal-weight universe (standardized per name).
+            # rho in [0,1] sets the signal-to-noise; larger rho -> a selector ranking names
+            # by this feature earns a higher active Sharpe (calibrated in __main__).
             fwd_all = panel.shift(-horizon) / panel - 1.0
-            fwd = fwd_all[target] - fwd_all.mean(axis=1)                   # forward excess return of the target
-            mu, sd = fwd.mean(), fwd.std() + 1e-9
-            z = ((fwd - mu) / sd).fillna(0.0).to_numpy()
-            tcol = cols.index(target)
-            # base (>0) keeps the target the top pick most bars (concentrate); rho*z injects the
-            # timing signal that shaves its worst-predicted stretches; the rest is noise.
-            sig = base + rho * z + np.sqrt(1.0 - rho ** 2) * noise[:, tcol]
-            df[target] = mag * sig                                        # dominates the unit-variance noise features
+            ex = fwd_all.sub(fwd_all.mean(axis=1), axis=0)                 # per-name forward excess return
+            z = ((ex - ex.mean()) / (ex.std() + 1e-9)).fillna(0.0).to_numpy()
+            df = pd.DataFrame(rho * z + np.sqrt(1.0 - rho ** 2) * noise,
+                              index=idx, columns=cols)
         feats[fname] = df
     return feats
 

@@ -407,7 +407,7 @@ def run(tickers=data_mag7.MAG7, start="2015-01-01", iterations=200, model="claud
         except Exception:
             pass
     radem = xs.rademacher_bar(cand, pool, full_rets, tools, splits, bench_full,
-                              n_scramble=15, cost=cost, k=k, feats=feats_full, fit_budget=fit_budget)
+                              n_scramble=30, cost=cost, k=k, feats=feats_full, fit_budget=min(fit_budget, 60))
     dsr = xs.deflated_sharpe(champ_active,
                              [d["median_oos"] / (bt.PERIODS_PER_YEAR ** 0.5) for d in pop],
                              n_trials=len(pop))

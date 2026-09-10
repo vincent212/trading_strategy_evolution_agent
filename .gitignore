@@ -16,3 +16,7 @@ venv/
 runs_*/
 *.pyc
 /tmp/
+
+# experiment run-output dirs (scratch)
+e1_*/
+e2_*/
