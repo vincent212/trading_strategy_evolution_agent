@@ -186,6 +186,27 @@ def make_quarter_splits(index: pd.DatetimeIndex, n_splits: int = 100,
     return splits
 
 
+def make_purged_kfold_splits(index: pd.DatetimeIndex, n_folds: int = 6, embargo: int = 250,
+                             **_):
+    """Contiguous, CHRONOLOGICAL k-fold with purging+embargo — the honest CV. Each fold is
+    a contiguous block used once as the test set; training is every OTHER bar EXCEPT an
+    `embargo`-bar band around the test block (so adjacent, overlapping-lookback bars do not
+    leak train->test). Signature-compatible with make_quarter_splits (ignores n_splits/seed).
+    `embargo` should exceed the longest feature lookback."""
+    n = len(index)
+    bounds = np.linspace(0, n, int(n_folds) + 1).astype(int)
+    splits = []
+    for i in range(int(n_folds)):
+        lo, hi = bounds[i], bounds[i + 1]
+        test = np.zeros(n, dtype=bool)
+        test[lo:hi] = True
+        train = ~test
+        train[max(0, lo - int(embargo)):min(n, hi + int(embargo))] = False   # purge/embargo band
+        if test.any() and train.any():
+            splits.append((train, test))
+    return splits
+
+
 # ---- fit (training) ---------------------------------------------------------
 
 def buyhold_returns(close, cost: float = 0.0005) -> np.ndarray:

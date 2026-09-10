@@ -13,3 +13,10 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+runs_*/
+*.pyc
+/tmp/
+
+# experiment run-output dirs (scratch)
+e1_*/
+e2_*/
